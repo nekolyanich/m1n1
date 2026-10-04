@@ -2,7 +2,7 @@
 
 from ..utils import *
 from . import ADTDevTracer
-from ..hw.spmi import SPMIRegs
+from ..hw.spmi1 import SPMI1Regs as SPMIRegs  # tracer decodes the gen 1 FIFO layout
 from ..hv import TraceMode
 
 # see docs/hw/soc/spmi.md and docs/hw/peripherals/ace3.md
