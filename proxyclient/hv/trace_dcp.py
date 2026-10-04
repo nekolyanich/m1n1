@@ -1442,6 +1442,12 @@ def readmem_iova(addr, size, readfn):
 
 iomon.readmem = readmem_iova
 
+# TRACE_DCP_SILENT="0x29,0x2b": endpoints to trace silently (the AV stream floods the
+# log and slows the guest until macOS's watchdog reboots it)
+for _ep in filter(None, os.environ.get("TRACE_DCP_SILENT", "").split(",")):
+    DCPTracer.ENDPOINTS[int(_ep, 0)] = SilentEp
+    print(f"trace_dcp: endpoint {_ep} silenced")
+
 dcp_tracer = DCPTracer(hv, get_dcp_device(DCPDevType.DCP, dcp_name), verbose=1)
 dcp_tracer.start(dart_dcp_tracer.dart, stream=dcp_sid)
 
