@@ -874,6 +874,7 @@ class HV(Reloadable):
     def handle_dabort(self, ctx):
         insn = self.p.read32(ctx.elr_phys)
         far_phys = self.p.hv_translate(ctx.far, True, False)
+        self.log(f"dabort: FAR={ctx.far:#x} -> IPA={far_phys:#x} ELR={ctx.elr:#x}")
 
         if insn & 0x3b200c00 == 0x38200000:
             page = far_phys & ~0x3fff
