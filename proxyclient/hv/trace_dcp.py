@@ -306,6 +306,15 @@ class EPICEp(AFKEp):
             self.serv_names[i.NAME] = i
 
     def handle_ipc(self, data, dir=None):
+        # HACK: newer firmware (macOS 15) changes EPIC framing; never stop the guest
+        # over a message we cannot parse, log it raw instead.
+        try:
+            return self._handle_ipc(data, dir)
+        except Exception as e:
+            self.log(f"{dir}EPIC unparsed ({type(e).__name__}: {e}) len={len(data)}")
+            chexdump(data[:0x100], print_fn=self.log)
+
+    def _handle_ipc(self, data, dir=None):
         fd = BytesIO(data)
         hdr = EPICHeader.parse_stream(fd)
         sub = EPICSubHeader.parse_stream(fd)

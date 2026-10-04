@@ -36,7 +36,9 @@ VERSION_MAP = {
     "iBoot-8422.100.650": "V13_3",
     "iBoot-8422.140.50.0.2": "V13_5B4",
     "iBoot-8422.141.2": "V13_5",
-    "iBoot-10151.140.19.700.2": "V14_7"
+    "iBoot-10151.140.19.700.2": "V14_7",
+    # HACK: macOS 15 (m2pro's guest); no 15.x layouts modelled, parse as the newest known
+    "iBoot-11881.140.96.701.1": "V14_7",
 }
 
 class ProxyUtils(Reloadable):

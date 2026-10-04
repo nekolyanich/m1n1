@@ -372,7 +372,12 @@ class HV(Reloadable):
         while True:
             try:
                 return func()
-            except Exception:
+            except Exception as e:
+                # HV_TRACER_NOSHELL=1: a tracer that cannot parse something must not
+                # park the guest in a shell (the target's watchdog resets it).
+                if not needs_ret and os.environ.get("HV_TRACER_NOSHELL"):
+                    print(f"Exception in {description} (skipped): {type(e).__name__}: {e}")
+                    return
                 print(f"Exception in {description}")
                 traceback.print_exc()
 
