@@ -1454,6 +1454,11 @@ class DCPTracer(ASCTracer):
         0x37: DCPEp, # iomfb-link
     }
 
+    # the watcher only needs the rings, not the EPIC parser: follow disp0 too
+    if dcp_watch:
+        ENDPOINTS = dict(ENDPOINTS)
+        ENDPOINTS[0x23] = type("Disp0WatchEp", (AFKEp,), {"NAME": "disp0"})
+
     def handle_msg(self, direction, r0, r1):
         super().handle_msg(direction, r0, r1)
         #iomon.poll()
