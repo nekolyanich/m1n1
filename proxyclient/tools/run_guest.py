@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import sys, pathlib, traceback
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+# Behind a pipe (tee into a log) stdout is block-buffered and hides the last lines
+sys.stdout.reconfigure(line_buffering=True)
 
 import argparse, pathlib
 from io import BytesIO
