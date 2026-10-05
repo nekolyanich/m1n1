@@ -242,6 +242,8 @@ static void watch_emit(int type, u32 id, u32 a, u32 b, const void *data, u32 len
     spin_unlock(&watch_lock);
 }
 
+static void watch_fresh(u64 pa, u64 len);
+
 /* Copy [off, off + len) of the ring region, walking the physical segments */
 static void watch_read(struct watch_ring *r, u64 off, void *dst, u64 len)
 {
@@ -253,6 +255,8 @@ static void watch_read(struct watch_ring *r, u64 off, void *dst, u64 len)
             continue;
         }
         u64 n = min(len, s->len - off);
+        // the watcher runs cached now: what DCP or the guest wrote, not our stale line
+        watch_fresh(s->pa + off, n);
         memcpy(d, (void *)(s->pa + off), n);
         d += n;
         len -= n;
@@ -524,6 +528,12 @@ int hv_watch_start(int cpu, u64 log, u64 size, u64 flags)
         watch_nhi_on[i] = false;
     sysop("dsb ish");
 
+    /*
+     * The guest never starts this CPU (it is out of its ADT), so nothing turned its MMU
+     * on: with it off every access is Device-nGnRnE, the log lock's exclusives are
+     * unpredictable (that reset the machine) and every poll goes past the caches.
+     */
+    mmu_init_secondary(cpu);
     hv_watch_cpu = cpu;
     hv_watch_active = true;
     smp_call4(cpu, hv_watch_main, 0, 0, 0, 0);
