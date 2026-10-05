@@ -8,7 +8,6 @@
 #include "usb.h"
 
 bool active = false;
-static u64 tx_dropped = 0;
 
 u32 ucon = 0;
 u32 utrstat = 0;
@@ -95,16 +94,8 @@ static bool handle_vuart(struct exc_info *ctx, u64 addr, u64 *val, bool write, i
                 break;
             case UTXH: {
                 uint8_t b = *val;
-                // the vuart pipe is lossy: a full buffer drops output instead of waiting
-                if (iodev_can_write(IODEV_USB_VUART)) {
-                    if (iodev_write(IODEV_USB_VUART, &b, 1) < 1) {
-                        tx_dropped++;
-                    } else if (tx_dropped) {
-                        printf("HV: vuart dropped %lu bytes of guest output (host not reading)\n",
-                               tx_dropped);
-                        tx_dropped = 0;
-                    }
-                }
+                if (iodev_can_write(IODEV_USB_VUART))
+                    iodev_write(IODEV_USB_VUART, &b, 1);
                 handle_vuart_passthrough(b);
                 break;
             }

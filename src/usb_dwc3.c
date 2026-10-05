@@ -129,8 +129,6 @@ typedef struct dwc3_dev {
         u8 ep_in;
         u8 ep_out;
         bool ready;
-        /* never wait for the host: drop what does not fit, return what is there */
-        bool lossy;
         /* USB ACM CDC serial */
         u8 cdc_line_coding[7];
     } pipe[CDC_ACM_PIPE_MAX];
@@ -1082,12 +1080,6 @@ void usb_dwc3_handle_events(dwc3_dev_t *dev)
     if (!dev)
         return;
 
-    /*
-     * No guard against a second walk here (upstream has none): one that returned while
-     * another CPU walked left a writer spinning in usb_dwc3_queue() under the console
-     * lock, while the walker's own print waited for that lock. The input wedges after an
-     * idle spell came from it.
-     */
     u32 n_events = read32(dev->regs + DWC3_GEVNTCOUNT(0)) / sizeof(union dwc3_event);
     if (n_events == 0)
         return;
@@ -1103,12 +1095,6 @@ void usb_dwc3_handle_events(dwc3_dev_t *dev)
     }
 
     write32(dev->regs + DWC3_GEVNTCOUNT(0), sizeof(union dwc3_event) * n_events);
-}
-
-void usb_dwc3_set_lossy(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, bool lossy)
-{
-    if (dev)
-        dev->pipe[pipe].lossy = lossy;
 }
 
 dwc3_dev_t *usb_dwc3_init(uintptr_t regs, dart_dev_t *dart)
@@ -1362,7 +1348,6 @@ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf, 
 {
     const u8 *p = buf;
     size_t wrote, sent = 0;
-    int tries = 0;
 
     if (!dev || !dev->pipe[pipe].ready)
         return 0;
@@ -1379,9 +1364,6 @@ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf, 
         p += wrote;
         sent += wrote;
         if (count) {
-            // a lossy pipe gets one chance for the host to drain, then drops the rest
-            if (dev->pipe[pipe].lossy && tries++)
-                break;
             usb_dwc3_handle_events(dev);
             usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
         }
@@ -1424,8 +1406,6 @@ size_t usb_dwc3_read(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, void *buf, size_t 
         recvd += read;
         usb_dwc3_handle_events(dev);
         usb_dwc3_cdc_start_bulk_out_xfer(dev, ep);
-        if (dev->pipe[pipe].lossy)
-            break;
     }
 
     return recvd;
