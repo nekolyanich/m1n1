@@ -139,6 +139,8 @@ static void watch_put(const void *src, u64 len)
         u64 off = watch_log->head % watch_log->size;
         u64 n = min(len, watch_log->size - off);
         memcpy(watch_area + off, p, n);
+        // the host drains up to head while we run: the bytes before the head that covers them
+        sysop("dmb ish");
         watch_log->head += n;
         p += n;
         len -= n;

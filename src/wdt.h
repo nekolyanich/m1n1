@@ -3,11 +3,14 @@
 #ifndef __WDT_H__
 #define __WDT_H__
 
+#include "types.h"
+
 void wdt_disable(void);
 void wdt_reboot(void);
 void wdt_freeze(void);
 void wdt_thaw(void);
 void wdt_pet(void);
 void wdt_drop(void);
+void wdt_set_2nd_freeze(bool on);
 
 #endif

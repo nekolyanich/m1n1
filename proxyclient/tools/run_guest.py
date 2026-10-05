@@ -26,6 +26,12 @@ parser.add_argument('--hv-wdt', type=int, metavar='CPU', default=None,
 parser.add_argument('--watch', type=int, metavar='CPU', default=None,
                     help='Take CPU from the guest and poll AFK rings on it (hv_watch.c); '
                          'tracers arm rings with hv.watch_ring()')
+parser.add_argument('--watch-stream', type=pathlib.Path, metavar='FILE.bin', default=None,
+                    help='Stream the watcher log to FILE.bin (and FILE.json) during the session, '
+                         'from the proxy stops the guest takes anyway')
+parser.add_argument('--wdt2-freeze', action="store_true",
+                    help='Switch the secondary SoC watchdog off during HV stops too (default: '
+                         'only read and print it; its meaning under macOS is not known)')
 parser.add_argument('--watch-mmio', action="store_true",
                     help='Also allow the watcher to read MMIO registers (hv.watch_mmio(), gated '
                          'on PMGR power states). Without it the watcher only ever reads RAM.')
@@ -97,6 +103,8 @@ hv.watch_cpu = args.watch
 if args.watch_mmio and args.watch is None:
     parser.error("--watch-mmio needs --watch CPU")
 hv.watch_mmio_allowed = args.watch_mmio
+hv.watch_stream = str(args.watch_stream) if args.watch_stream else None
+hv.wdt2_freeze = args.wdt2_freeze
 
 hv.init()
 

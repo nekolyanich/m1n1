@@ -26,6 +26,7 @@ static u32 wdt_saved_cur[WDT_N];
 static u32 wdt_saved_ctrl[WDT_N];
 static u32 wdt_saved_bite1;
 static u32 wdt_saved_2nd;
+static bool wdt_2nd_freeze = false;
 static u32 wdt_shown[WDT_N + 1] = {~0u, ~0u, ~0u, ~0u};
 static bool wdt_frozen = false;
 
@@ -99,9 +100,10 @@ void wdt_freeze(void)
         wdt_saved_cur[i] = read32(wdt_base + WDT_CUR(i));
     }
 
-    // the secondary watchdog m1n1 disables at boot: 0 is off there too
+    // the secondary watchdog m1n1 disables at boot (0 is off there): read always, and
+    // switched off for the stop only when asked, its meaning under macOS is not known
     wdt_saved_2nd = wdt_2nd ? read32(wdt_2nd) : 0;
-    if (wdt_saved_2nd)
+    if (wdt_saved_2nd && wdt_2nd_freeze)
         write32(wdt_2nd, 0);
 
     wdt_saved_bite1 = read32(wdt_base + WDT_BITE(1));
@@ -117,6 +119,12 @@ void wdt_freeze(void)
         printf("WDT freeze: ctrl WD0 %x WD1 %x WD2 %x, secondary %x, WD1 bite %x\n", now[0],
                now[1], now[2], now[3], wdt_saved_bite1);
     }
+}
+
+void wdt_set_2nd_freeze(bool on)
+{
+    wdt_2nd_freeze = on;
+    printf("WDT: secondary watchdog %s during HV stops\n", on ? "switched off" : "only read");
 }
 
 void wdt_pet(void)
@@ -145,7 +153,7 @@ void wdt_thaw(void)
         return;
     wdt_release_deadhand();
 
-    if (wdt_saved_2nd)
+    if (wdt_saved_2nd && wdt_2nd_freeze)
         write32(wdt_2nd, wdt_saved_2nd);
 
     for (int i = 0; i < WDT_N; i++) {

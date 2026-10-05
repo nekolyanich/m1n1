@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-import io, sys, traceback, struct, array, bisect, os, plistlib, signal, runpy, secrets, asn1
+import io, sys, traceback, struct, array, bisect, os, plistlib, signal, runpy, secrets, asn1, time, json
 from construct import *
 from dataclasses import dataclass
 
@@ -109,6 +109,8 @@ class HV(Reloadable):
         self.xnu_mode = False
         self._update_shell_locals()
         self.wdt_cpu = None
+        # run_guest --wdt2-freeze: also switch the secondary SoC watchdog off in stops
+        self.wdt2_freeze = False
         # watcher (hv_watch.c): a CPU taken from the guest that polls AFK rings
         self.watch_cpu = None
         self.watch_size = 32 << 20
@@ -118,6 +120,15 @@ class HV(Reloadable):
         self._watch_pending = []
         # MMIO probes only with run_guest --watch-mmio; otherwise the watcher reads RAM only
         self.watch_mmio_allowed = False
+        # run_guest --watch-stream PATH: the log goes to the host while the session runs,
+        # so a target reset does not take it along (see watch_drain)
+        self.watch_stream = None
+        self.watch_drain_s = float(os.environ.get("WATCH_DRAIN_S", "0.5"))
+        self._watch_out = None
+        self._watch_drained = 0
+        self._watch_drained_at = 0.0
+        self._watch_lost = 0
+        self._watch_meta_dirty = True
         self.smp = True
         self.hook_exceptions = False
         self.sptm_mode = SPTM_MODE.SPTM_NONE
@@ -333,8 +344,62 @@ class HV(Reloadable):
             print(f"HV watch: ring {id:#x} refused ({ret - (1 << 64) if ret >> 63 else ret})")
             return False
         self.watch_rings[id] = (name or f"ring{id:#x}", blk, bufsize)
+        self._watch_meta_dirty = True
         self.log(f"HV watch: ring {id:#x} {name} iova {iova:#x} blk {blk:#x} size {bufsize:#x} -> {segs}")
         return True
+
+    def watch_drain(self, force=False):
+        '''Append what the watcher logged since the last drain to hv.watch_stream. Runs
+        in proxy stops the guest takes anyway, at most every watch_drain_s. The file is
+        a watch log that never wrapped (hv-watch-dump reads it), plus a .json beside it'''
+        if self.watch_log is None or not self.watch_stream:
+            return
+        now = time.monotonic()
+        if not force and now - self._watch_drained_at < self.watch_drain_s:
+            return
+        self._watch_drained_at = now
+        hdr = self.iface.readmem(self.watch_log, 64)
+        magic, ver, size, head, seq, drops, polls, cntfrq, flags = struct.unpack_from("<IIQQQQQQQ", hdr)
+        if self._watch_out is None:
+            self._watch_out = open(self.watch_stream, "w+b")
+            self._watch_out.write(bytes(64))
+        start = self._watch_drained
+        if head - start > size:
+            # overwritten before this drain got to it; the decoder resyncs on the next record
+            self._watch_lost += head - size - start
+            self._watch_meta_dirty = True
+            start = head - size
+        chunks = []
+        while start < head:
+            off = start % size
+            n = min(head - start, size - off)
+            chunks.append(self.iface.readmem(self.watch_log + 64 + off, n))
+            start += n
+        out = self._watch_out
+        out.seek(0, 2)
+        out.write(b"".join(chunks))
+        total = out.tell() - 64
+        out.seek(0)
+        out.write(struct.pack("<IIQQQQQQQ", magic, ver, 1 << 62, total, seq, drops, polls,
+                              cntfrq, flags))
+        out.flush()
+        self._watch_drained = head
+        if self._watch_meta_dirty:
+            meta = {"rings": {str(k): v for k, v in self.watch_rings.items()},
+                    "probes": {str(k): v for k, v in self.watch_probes.items()},
+                    "lost_bytes": self._watch_lost}
+            with open(os.path.splitext(self.watch_stream)[0] + ".json", "w") as f:
+                json.dump(meta, f)
+            self._watch_meta_dirty = False
+
+    def _watch_drain_safe(self, force=False):
+        try:
+            self.watch_drain(force)
+        except Exception as e:
+            if self.link_lost(e):
+                raise
+            print(f"HV watch: drain failed ({type(e).__name__}: {e}), streaming off")
+            self.watch_stream = None
 
     WATCH_MAX_GATES = 6
 
@@ -374,6 +439,7 @@ class HV(Reloadable):
         desc += b"".join(struct.pack("<QII", a, m, v) for a, m, v in packed)
         desc += bytes(16 * (self.WATCH_MAX_GATES - len(packed)))
         self.watch_probes[id] = (name or f"probe{id:#x}", addr, nwords)
+        self._watch_meta_dirty = True
         if self.watch_log is None:
             self._watch_pending.append((id, desc))
             return True
@@ -1117,6 +1183,8 @@ class HV(Reloadable):
         if self._sigint_pending or not handled or user_interrupt:
             self._sigint_pending = False
 
+            # everything so far is on the host before a stop of unknown length
+            self._watch_drain_safe(force=True)
             signal.signal(signal.SIGINT, self.default_sigint)
             ret = self.run_shell("Entering hypervisor shell", "Returning from exception")
             signal.signal(signal.SIGINT, self._handle_sigint)
@@ -1124,6 +1192,7 @@ class HV(Reloadable):
             if ret is None:
                 ret = EXC_RET.HANDLED
 
+        self._watch_drain_safe()
         self.pt_update()
 
         self._commit_context()
@@ -1139,6 +1208,7 @@ class HV(Reloadable):
         self._in_handler = True
         self._sigint_pending = False
 
+        self._watch_drain_safe(force=True)
         signal.signal(signal.SIGINT, self.default_sigint)
         ret = self.run_shell("Entering panic shell", "Exiting")
         signal.signal(signal.SIGINT, self._handle_sigint)
@@ -2356,6 +2426,8 @@ class HV(Reloadable):
 
         if self.wdt_cpu is not None:
             self.p.hv_wdt_start(self.wdt_cpu)
+        if self.wdt2_freeze:
+            self.p.hv_wdt2_freeze(1)
         if self.watch_cpu is not None and self.watch_cpu == self.wdt_cpu:
             print(f"HV watch: CPU {self.watch_cpu} already runs the HV watchdog, no watcher")
         elif self.watch_cpu is not None:

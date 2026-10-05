@@ -673,6 +673,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WATCH_ADD = 0xc14
     P_HV_WATCH_STOP = 0xc15
     P_HV_WATCH_PROBE = 0xc16
+    P_HV_WDT2_FREEZE = 0xc17
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1176,6 +1177,8 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WATCH_STOP)
     def hv_watch_probe(self, id, desc):
         return self.request(self.P_HV_WATCH_PROBE, id, desc)
+    def hv_wdt2_freeze(self, on):
+        return self.request(self.P_HV_WDT2_FREEZE, int(bool(on)))
 
     def fb_init(self):
         return self.request(self.P_FB_INIT)
