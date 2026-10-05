@@ -394,6 +394,18 @@ class HV(Reloadable):
                 json.dump(meta, f)
             self._watch_meta_dirty = False
 
+    def _heartbeat(self, interval=5):
+        '''While the guest runs, one '.' on the proxy iodev every interval seconds; a stray
+        one that lands in a proxy stop is skipped by the packet magic sync'''
+        while True:
+            time.sleep(interval)
+            if self._in_handler:
+                continue
+            try:
+                self.iface.dev.write(b".")
+            except Exception:
+                return
+
     def _watch_drain_safe(self, force=False):
         try:
             self.watch_drain(force)
@@ -2465,6 +2477,10 @@ class HV(Reloadable):
         # Does not return
 
         self.started = True
+        # host heartbeat (hv.c hv_tick): a silent host for 60 s gets the target rebooted
+        if os.environ.get("HV_HEARTBEAT", "1") != "0":
+            import threading
+            threading.Thread(target=self._heartbeat, daemon=True).start()
         for cpu_node in list(self.adt["cpus"]):
             if cpu_node.state == "running":
                 break

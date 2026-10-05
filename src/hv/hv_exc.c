@@ -79,6 +79,8 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
     wdt_freeze();
     hv_smcwd_freeze();
     int ret = uartproxy_run(&start);
+    // the host just talked to us: the heartbeat clock starts over after a stop
+    hv_host_alive();
     hv_wdt_resume();
 
     switch (ret) {

@@ -110,6 +110,7 @@ void hv_wdt_breadcrumb(char c);
 void hv_do_panic(void);
 
 u64 hv_stolen_time(void);
+void hv_host_alive(void);
 
 /* The SMC-enforced watchdog deadline macOS writes, shifted by the stolen time */
 int hv_smcwd_hook(u64 addr);

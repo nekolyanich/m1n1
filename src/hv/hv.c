@@ -618,15 +618,51 @@ void hv_maybe_exit(void)
     }
 }
 
+/*
+ * Host heartbeat: while the guest runs, run_guest sends HV_HOST_HEARTBEAT every few
+ * seconds on the proxy iodev. A host that has sent one and then stays silent for
+ * HV_HOST_TIMEOUT_S (USB link wedged, run_guest gone) gets the machine rebooted, so
+ * bench-guest can park it: neither the HV watchdog (the HV still ticks) nor the
+ * guest's (the guest still pets it) catches that. Any other byte is a user interrupt.
+ */
+#define HV_HOST_HEARTBEAT '.'
+#define HV_HOST_TIMEOUT_S 60
+
+static volatile u64 hv_host_seen;
+static volatile bool hv_host_beats;
+static volatile bool hv_user_irq;
+
+void hv_host_alive(void)
+{
+    hv_host_seen = mrs(CNTPCT_EL0);
+}
+
 void hv_tick(struct exc_info *ctx)
 {
     hv_wdt_pet();
     iodev_handle_events(uartproxy_iodev);
-    if (iodev_can_read(uartproxy_iodev)) {
+    while (!hv_user_irq && iodev_can_read(uartproxy_iodev)) {
+        u8 b;
+        if (iodev_read(uartproxy_iodev, &b, 1) != 1)
+            break;
+        if (b == HV_HOST_HEARTBEAT) {
+            hv_host_beats = true;
+            hv_host_alive();
+        } else {
+            // the proxy syncs on its packet magic, so the byte itself is not needed
+            hv_user_irq = true;
+        }
+    }
+    if (hv_user_irq && (hv_pinned_cpu == -1 || hv_pinned_cpu == smp_id())) {
+        hv_user_irq = false;
         printf("HV: User interrupt\n");
         iodev_console_flush();
-        if (hv_pinned_cpu == -1 || hv_pinned_cpu == smp_id())
-            hv_exc_proxy(ctx, START_HV, HV_USER_INTERRUPT, NULL);
+        hv_exc_proxy(ctx, START_HV, HV_USER_INTERRUPT, NULL);
+    }
+    if (hv_host_beats && is_boot_cpu() &&
+        mrs(CNTPCT_EL0) - hv_host_seen > HV_HOST_TIMEOUT_S * mrs(CNTFRQ_EL0)) {
+        printf("HV: no heartbeat from the host for %d s, rebooting\n", HV_HOST_TIMEOUT_S);
+        flush_and_reboot();
     }
     hv_vuart_poll();
 }
