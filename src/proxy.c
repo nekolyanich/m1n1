@@ -27,7 +27,6 @@
 #include "uartproxy.h"
 #include "usb.h"
 #include "utils.h"
-#include "wdt.h"
 #include "xnuboot.h"
 
 #include "minilzlib/minlzma.h"
@@ -564,8 +563,8 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WATCH_PROBE:
             reply->retval = hv_watch_probe(request->args[0], request->args[1]);
             break;
-        case P_HV_WDT2_FREEZE:
-            wdt_set_2nd_freeze(request->args[0]);
+        case P_HV_SMCWD_HOOK:
+            reply->retval = hv_smcwd_hook(request->args[0]);
             break;
 
         case P_FB_INIT:

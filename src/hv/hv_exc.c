@@ -77,6 +77,7 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
     // The guest's SoC watchdogs must not see the stop either; a dead hand stands in for
     // them while in the proxy, and they stay disarmed if the guest exits
     wdt_freeze();
+    hv_smcwd_freeze();
     int ret = uartproxy_run(&start);
     hv_wdt_resume();
 
@@ -88,6 +89,8 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
                 stolen_time += lost;
             }
             wdt_thaw();
+            // after the stolen time is updated: the deadline is shifted by it
+            hv_smcwd_thaw();
             break;
         case EXC_EXIT_GUEST:
             wdt_drop();
@@ -146,6 +149,12 @@ void hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, u32 type
      * to the guest.
      */
     hv_maybe_switch_cpu(ctx, reason, type, extra);
+}
+
+/* CNTPCT ticks the guest's virtual clock lags behind the real one */
+u64 hv_stolen_time(void)
+{
+    return stolen_time;
 }
 
 void hv_set_time_stealing(bool enabled, bool reset)

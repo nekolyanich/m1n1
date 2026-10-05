@@ -109,8 +109,10 @@ class HV(Reloadable):
         self.xnu_mode = False
         self._update_shell_locals()
         self.wdt_cpu = None
-        # run_guest --wdt2-freeze: also switch the secondary SoC watchdog off in stops
-        self.wdt2_freeze = False
+        # macOS' SMC watchdog deadline shifted by the stolen time (hv_smcwd.c);
+        # run_guest --no-smcwd-fix leaves the guest writing it directly
+        self.smcwd_fix = True
+        self.smcwd_addr = None
         # watcher (hv_watch.c): a CPU taken from the guest that polls AFK rings
         self.watch_cpu = None
         self.watch_size = 32 << 20
@@ -1748,6 +1750,15 @@ class HV(Reloadable):
             self.add_tracer(irange(node.cpu_impl_reg[0] + 0x100, 8),
                             "CPU STATE HACK", TraceMode.RESERVED)
 
+        # macOS' SMC watchdog deadline (the secondary WDT word): m1n1 hooks it in
+        # hv_smcwd.c at start() so the deadline follows the stolen time
+        self.smcwd_addr = None
+        if self.smcwd_fix and "wdt" in self.adt["/arm-io"]:
+            wdt = self.adt["/arm-io/wdt"]
+            if getattr(wdt, "wdt_version", None) in (2, 3) and len(wdt.reg) > 2:
+                self.smcwd_addr = wdt.get_reg(2)[0]
+                self.add_tracer(irange(self.smcwd_addr, 8), "SMC WDT DEADLINE", TraceMode.RESERVED)
+
         def cpustart_wh(base, off, data, width):
             self.log(f"CPUSTART W {base:x}+{off:x}:{width} = 0x{data:x}")
             if off >= 8:
@@ -2426,8 +2437,10 @@ class HV(Reloadable):
 
         if self.wdt_cpu is not None:
             self.p.hv_wdt_start(self.wdt_cpu)
-        if self.wdt2_freeze:
-            self.p.hv_wdt2_freeze(1)
+        if self.smcwd_addr is not None:
+            ret = self.p.hv_smcwd_hook(self.smcwd_addr)
+            print(f"HV: SMC watchdog deadline @{self.smcwd_addr:#x} "
+                  f"{'follows the stolen time' if ret == 0 else f'NOT hooked ({ret:#x})'}")
         if self.watch_cpu is not None and self.watch_cpu == self.wdt_cpu:
             print(f"HV watch: CPU {self.watch_cpu} already runs the HV watchdog, no watcher")
         elif self.watch_cpu is not None:

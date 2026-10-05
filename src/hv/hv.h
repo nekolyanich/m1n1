@@ -109,6 +109,13 @@ void hv_wdt_stop(void);
 void hv_wdt_breadcrumb(char c);
 void hv_do_panic(void);
 
+u64 hv_stolen_time(void);
+
+/* The SMC-enforced watchdog deadline macOS writes, shifted by the stolen time */
+int hv_smcwd_hook(u64 addr);
+void hv_smcwd_freeze(void);
+void hv_smcwd_thaw(void);
+
 /* Watcher: polls AFK rings from a CPU taken from the guest */
 int hv_watch_start(int cpu, u64 log, u64 size, u64 flags);
 int hv_watch_add(u32 id, u64 desc);

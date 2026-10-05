@@ -71,8 +71,9 @@ void hv_wdt_bark(void)
 
     uart_puts("Attempting to enter proxy");
 
-    // A panic shell that wedges too still resets the machine
+    // A panic shell that wedges too still resets the machine; the SMC deadline is off
     wdt_freeze();
+    hv_smcwd_freeze();
 
     struct uartproxy_msg_start start = {
         .reason = START_HV,
