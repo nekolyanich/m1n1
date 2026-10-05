@@ -41,6 +41,7 @@ def get_dcp_device(dev_type, dcp):
         raise KeyError(dev_type)
 
 dcp_name = os.environ.get("TRACE_DCP", "dcp0")
+dcp_watch = os.environ.get("TRACE_DCP_WATCH", "0") == "1"
 
 trace_device(get_dcp_device(DCPDevType.DCP, dcp_name), True, ranges=[1])
 
@@ -92,10 +93,22 @@ class AFKEp(EP):
             off, size = self.state.txbuf_info
             self.txbuf = AFKRingBufSniffer(self, self.state.txbuf,
                                            self.state.shmem_iova + off, size)
+            self.watch(self.txbuf, 0)
         if not self.rxbuf and self.state.rxbuf_info:
             off, size = self.state.rxbuf_info
             self.rxbuf = AFKRingBufSniffer(self, self.state.rxbuf,
                                            self.state.shmem_iova + off, size)
+            self.watch(self.rxbuf, 1)
+
+    # TRACE_DCP_WATCH=1: the HV watcher copies the rings (run_guest --watch CPU);
+    # hv-watch-dump decodes them offline. Ring id: epid << 1 | (1 for RX)
+    def watch(self, buf, rx):
+        if not dcp_watch:
+            return
+        ok = hv.watch_ring(self.epid << 1 | rx, self.dart, self.stream, buf.base,
+                           buf.block_size, buf.bufsize, name=self.name)
+        self.log(f"watch {'RX' if rx else 'TX'} ring {buf.base:#x}: {'on' if ok else 'FAILED'}")
+        buf.watched = ok
 
     def add_mon(self):
         if self.state.shmem_iova:
@@ -124,6 +137,8 @@ class AFKEp(EP):
     @msg(0xa2, DIR.TX, AFKEP_Send)
     def Send(self, msg):
         self.log(f">TX msg:{msg}")
+        if getattr(self.txbuf, "watched", False):
+            return True
         for data in self.txbuf.read():
             if self.state.verbose >= 3:
                 self.log(f">TX rptr={self.txbuf.state.rptr:#x}")
@@ -152,6 +167,8 @@ class AFKEp(EP):
     @msg(0x85, DIR.RX, AFKEPMessage)
     def Recv(self, msg):
         self.log(f"<RX msg:{msg}")
+        if getattr(self.rxbuf, "watched", False):
+            return True
         for data in self.rxbuf.read():
             if self.state.verbose >= 3:
                 self.log(f"<RX rptr={self.rxbuf.state.rptr:#x}")

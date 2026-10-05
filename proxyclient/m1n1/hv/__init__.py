@@ -109,6 +109,11 @@ class HV(Reloadable):
         self.xnu_mode = False
         self._update_shell_locals()
         self.wdt_cpu = None
+        # watcher (hv_watch.c): a CPU taken from the guest that polls AFK rings
+        self.watch_cpu = None
+        self.watch_size = 32 << 20
+        self.watch_log = None
+        self.watch_rings = {}
         self.smp = True
         self.hook_exceptions = False
         self.sptm_mode = SPTM_MODE.SPTM_NONE
@@ -293,6 +298,39 @@ class HV(Reloadable):
                             name=name)
         else:
             self.del_tracer(zone, "PrintTracer")
+
+    WATCH_MAX_SEGS = 16
+
+    def watch_ring(self, id, dart, stream, iova, blk, bufsize, name=None):
+        '''Have the watcher follow the AFK ring at iova (bufsize data bytes, block blk); the
+        same id re-arms it. hv.watch_rings keeps id -> (name, blk, bufsize) for the decoder'''
+        if self.watch_log is None:
+            return False
+        segs = []
+        for pa, n in dart.iotranslate(stream, iova, 3 * blk + bufsize):
+            if pa is None:
+                print(f"HV watch: ring {id:#x} at iova {iova:#x} is not mapped")
+                return False
+            if segs and segs[-1][0] + segs[-1][1] == pa:
+                segs[-1] = (segs[-1][0], segs[-1][1] + n)
+            else:
+                segs.append((pa, n))
+        if len(segs) > self.WATCH_MAX_SEGS:
+            print(f"HV watch: ring {id:#x} has {len(segs)} pieces, max {self.WATCH_MAX_SEGS}")
+            return False
+        desc = struct.pack("<IIII", id, len(segs), blk, bufsize)
+        desc += b"".join(struct.pack("<QQ", pa, n) for pa, n in segs)
+        desc += bytes(16 * (self.WATCH_MAX_SEGS - len(segs)))
+        if getattr(self, "_watch_desc", None) is None:
+            self._watch_desc = self.u.heap.malloc(len(desc))
+        self.iface.writemem(self._watch_desc, desc)
+        ret = self.p.hv_watch_add(id, self._watch_desc)
+        if ret != 0:
+            print(f"HV watch: ring {id:#x} refused ({ret - (1 << 64) if ret >> 63 else ret})")
+            return False
+        self.watch_rings[id] = (name or f"ring{id:#x}", blk, bufsize)
+        self.log(f"HV watch: ring {id:#x} {name} iova {iova:#x} blk {blk:#x} size {bufsize:#x} -> {segs}")
+        return True
 
     def pt_update(self):
         if not self.dirty_maps:
@@ -1679,8 +1717,10 @@ class HV(Reloadable):
                     node.dfp_endpoints = [name for name in endpoints if name != target]
                     print(f"Removing display endpoint {target} from {node._path}")
 
-        if self.wdt_cpu is not None:
-            name = f"/cpus/cpu{self.wdt_cpu}"
+        for cpu in (self.wdt_cpu, self.watch_cpu):
+            if cpu is None:
+                continue
+            name = f"/cpus/cpu{cpu}"
             print(f"Removing ADT node {name}")
             try:
                 del self.adt[name]
@@ -2241,6 +2281,14 @@ class HV(Reloadable):
 
         if self.wdt_cpu is not None:
             self.p.hv_wdt_start(self.wdt_cpu)
+        if self.watch_cpu is not None and self.watch_cpu == self.wdt_cpu:
+            print(f"HV watch: CPU {self.watch_cpu} already runs the HV watchdog, no watcher")
+        elif self.watch_cpu is not None:
+            self.watch_log = self.u.heap.malloc(self.watch_size)
+            ret = self.p.hv_watch_start(self.watch_cpu, self.watch_log, self.watch_size)
+            if ret != 0:
+                print(f"HV watch: could not start on CPU {self.watch_cpu} ({ret:#x})")
+                self.watch_log = None
         # Does not return
 
         self.started = True

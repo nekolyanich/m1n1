@@ -283,6 +283,7 @@ void hv_start(void *entry, u64 regs[4])
     spin_lock(&bhl);
 
     hv_wdt_stop();
+    hv_watch_stop();
 
     printf("HV: Exiting hypervisor (main CPU)\n");
 

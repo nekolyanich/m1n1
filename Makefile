@@ -135,6 +135,7 @@ HV_OBJECTS := $(patsubst %,hv/%, \
 	hv_virtio.o \
 	hv_vm.o \
 	hv_vuart.o \
+	hv_watch.o \
 	hv_wdt.o)
 
 OBJECTS := \

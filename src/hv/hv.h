@@ -109,6 +109,11 @@ void hv_wdt_stop(void);
 void hv_wdt_breadcrumb(char c);
 void hv_do_panic(void);
 
+/* Watcher: polls AFK rings from a CPU taken from the guest */
+int hv_watch_start(int cpu, u64 log, u64 size);
+int hv_watch_add(u32 id, u64 desc);
+void hv_watch_stop(void);
+
 #define hv_panic(fmt, ...)                                                                         \
     do {                                                                                           \
         debug_printf("HV panic:" fmt, ##__VA_ARGS__);                                              \

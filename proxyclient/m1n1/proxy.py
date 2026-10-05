@@ -669,6 +669,9 @@ class M1N1Proxy(Reloadable):
     P_HV_ADD_TIME = 0xc10
     P_HV_SPTM_SET_MODE = 0xc11
     P_HV_SPRR_RESERVE_POOL = 0xc12
+    P_HV_WATCH_START = 0xc13
+    P_HV_WATCH_ADD = 0xc14
+    P_HV_WATCH_STOP = 0xc15
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1164,6 +1167,12 @@ class M1N1Proxy(Reloadable):
 
     def hv_sprr_reserve_pool(self, size):
         return self.request(self.P_HV_SPRR_RESERVE_POOL, size)
+    def hv_watch_start(self, cpu, log, size):
+        return self.request(self.P_HV_WATCH_START, cpu, log, size)
+    def hv_watch_add(self, id, desc):
+        return self.request(self.P_HV_WATCH_ADD, id, desc)
+    def hv_watch_stop(self):
+        return self.request(self.P_HV_WATCH_STOP)
 
     def fb_init(self):
         return self.request(self.P_FB_INIT)

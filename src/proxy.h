@@ -148,6 +148,9 @@ typedef enum {
     P_HV_ADD_TIME,
     P_HV_SPTM_SET_MODE,
     P_HV_SPRR_RESERVE_POOL,
+    P_HV_WATCH_START,
+    P_HV_WATCH_ADD,
+    P_HV_WATCH_STOP,
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

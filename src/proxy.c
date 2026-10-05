@@ -550,6 +550,15 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_SPRR_RESERVE_POOL:
             reply->retval = hv_sprr_reserve_pool(request->args[0]);
             break;
+        case P_HV_WATCH_START:
+            reply->retval = hv_watch_start(request->args[0], request->args[1], request->args[2]);
+            break;
+        case P_HV_WATCH_ADD:
+            reply->retval = hv_watch_add(request->args[0], request->args[1]);
+            break;
+        case P_HV_WATCH_STOP:
+            hv_watch_stop();
+            break;
 
         case P_FB_INIT:
             fb_init(request->args[0]);

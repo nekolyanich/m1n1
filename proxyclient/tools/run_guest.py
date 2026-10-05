@@ -23,6 +23,9 @@ parser.add_argument('-C', '--cpus', default=None)
 parser.add_argument('--hv-wdt', type=int, metavar='CPU', default=None,
                     help='Take CPU from the guest and run the HV watchdog on it: if the HV '
                          'stops ticking for 1 s, it barks into the proxy (panic shell)')
+parser.add_argument('--watch', type=int, metavar='CPU', default=None,
+                    help='Take CPU from the guest and poll AFK rings on it (hv_watch.c); '
+                         'tracers arm rings with hv.watch_ring()')
 parser.add_argument('--strip-node', action="append", default=[], metavar='SUBSTR',
                     help='Remove every ADT node whose name contains SUBSTR.')
 parser.add_argument('-r', '--raw', action="store_true")
@@ -87,6 +90,7 @@ hv.hook_exceptions = args.hook_exceptions
 hv.sptm_mode = args.sptm_mode
 hv.sprr_pool_size = args.sprr_pool_size * 1024 * 1024
 hv.wdt_cpu = args.hv_wdt
+hv.watch_cpu = args.watch
 
 hv.init()
 
