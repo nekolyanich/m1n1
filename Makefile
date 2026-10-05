@@ -272,10 +272,13 @@ build/$(NAME).macho: build/$(NAME).elf
 	$(QUIET)echo "  MACHO $@"
 	$(QUIET)$(OBJCOPY) -O binary --strip-debug $< $@
 
+# m1n1.bin is written aside and renamed into place: a bench session that chainloads it
+# while a build runs gets the old file or the new one, never half of one
 ifeq ($(LOGO),)
 build/$(NAME).bin: build/$(NAME)-raw.elf
 	$(QUIET)echo "  RAW   $@"
-	$(QUIET)$(OBJCOPY) -O binary --strip-debug $< $@
+	$(QUIET)$(OBJCOPY) -O binary --strip-debug $< $@.tmp
+	$(QUIET)mv -f $@.tmp $@
 
 else
 build/$(NAME)-asahi.bin: build/$(NAME)-raw.elf
@@ -284,7 +287,8 @@ build/$(NAME)-asahi.bin: build/$(NAME)-raw.elf
 
 build/$(NAME).bin: build/$(NAME)-asahi.bin build/$(LOGO).logo
 	$(QUIET)echo "  RAW   $@"
-	$(QUIET)cat $^ > $@
+	$(QUIET)cat $^ > $@.tmp
+	$(QUIET)mv -f $@.tmp $@
 endif
 
 .INTERMEDIATE: build-tag build-cfg
