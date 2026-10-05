@@ -9,7 +9,19 @@
 #define WDT_ALARM 0x14
 #define WDT_CTL   0x1c
 
+/* The block has three watchdogs (WD0 also barks with an IRQ), 0x10 apart */
+#define WDT_N              3
+#define WDT_CUR(n)         (0x10 * (n))
+#define WDT_CTRL(n)        (0x10 * (n) + 0xc)
+#define WDT_CTRL_IRQ_EN    BIT(0)
+#define WDT_CTRL_IRQ_STAT  BIT(1)
+#define WDT_CTRL_RESET_EN  BIT(2)
+#define WDT_CTRL_ARMED     (WDT_CTRL_IRQ_EN | WDT_CTRL_RESET_EN)
+
 static u64 wdt_base = 0;
+static u32 wdt_saved_cur[WDT_N];
+static u32 wdt_saved_ctrl[WDT_N];
+static bool wdt_frozen = false;
 
 void wdt_disable(void)
 {
@@ -56,4 +68,48 @@ void wdt_reboot(void)
     write32(wdt_base + WDT_ALARM, 0x100000);
     write32(wdt_base + WDT_COUNT, 0);
     write32(wdt_base + WDT_CTL, 4);
+}
+
+/*
+ * The counters tick on wall time while the guest pets them on its own, stolen time:
+ * a long stop in the HV proxy lets them bark (macOS: WD0 IRQ at 5 s) or bite (WD1,
+ * 90 s). Disarm them for the stop and put the counts back on the way out.
+ */
+void wdt_freeze(void)
+{
+    if (!wdt_base || wdt_frozen)
+        return;
+
+    for (int i = 0; i < WDT_N; i++) {
+        wdt_saved_ctrl[i] = read32(wdt_base + WDT_CTRL(i));
+        if (!(wdt_saved_ctrl[i] & WDT_CTRL_ARMED))
+            continue;
+        write32(wdt_base + WDT_CTRL(i), 0);
+        wdt_saved_cur[i] = read32(wdt_base + WDT_CUR(i));
+    }
+    wdt_frozen = true;
+}
+
+void wdt_thaw(void)
+{
+    if (!wdt_frozen)
+        return;
+    wdt_frozen = false;
+
+    for (int i = 0; i < WDT_N; i++) {
+        u32 ctrl = wdt_saved_ctrl[i];
+        if (!(ctrl & WDT_CTRL_ARMED))
+            continue;
+
+        // If the count cannot be set back, a pet is the next best thing
+        write32(wdt_base + WDT_CUR(i), wdt_saved_cur[i]);
+        if (read32(wdt_base + WDT_CUR(i)) > (u64)wdt_saved_cur[i] + 24000)
+            write32(wdt_base + WDT_CUR(i), 0);
+
+        // IRQ_STAT is write-1-to-clear: drop a bark raised during the stop, keep an older one
+        ctrl &= ~WDT_CTRL_IRQ_STAT;
+        if (!(wdt_saved_ctrl[i] & WDT_CTRL_IRQ_STAT))
+            ctrl |= WDT_CTRL_IRQ_STAT;
+        write32(wdt_base + WDT_CTRL(i), ctrl);
+    }
 }
