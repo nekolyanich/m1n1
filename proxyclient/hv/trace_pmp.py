@@ -5,6 +5,7 @@ from m1n1.utils import *
 from m1n1.constructutils import *
 from m1n1.proxyutils import RegMonitor
 
+import os
 import sys
 import struct
 
@@ -113,11 +114,21 @@ class PMPTracer(ASCTracer):
         iomon_args.poll()
         super().w_CPU_CONTROL(val)
 
-dart_pmp_tracer = DARTTracer(hv, "/arm-io/dart-pmp", verbose=4)
-dart_pmp_tracer.start()
+if os.environ.get("TRACE_PMP_ASYNC"):
+    # Raw ASYNC trace of the ASC mailbox page only, no SYNC stop per message (macOS
+    # under the HV is sensitive to those). W.8 +0x800/+0x808 AP->PMP, R.8 +0x830/+0x838
+    # PMP->AP; the report table below stays traced as well.
+    dart_pmp_tracer = None
+    _base, _size = u.adt["/arm-io/pmp"].get_reg(0)
+    _mbox = _base + 0x8000 if _size > 0x8000 else _base
+    hv.trace_range(irange(_mbox, 0x4000), TraceMode.ASYNC, name="pmp-mbox")
+    print(f"trace_pmp: ASYNC mailbox {_mbox:#x}+0x4000")
+else:
+    dart_pmp_tracer = DARTTracer(hv, "/arm-io/dart-pmp", verbose=4)
+    dart_pmp_tracer.start()
 
-pmp_tracer = PMPTracer(hv, "/arm-io/pmp", verbose=1)
-pmp_tracer.start(dart_pmp_tracer.dart)
+    pmp_tracer = PMPTracer(hv, "/arm-io/pmp", verbose=1)
+    pmp_tracer.start(dart_pmp_tracer.dart)
 
 def readmem_iova(addr, size, readfn=None):
     try:
