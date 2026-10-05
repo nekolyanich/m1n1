@@ -15,7 +15,6 @@
 #include "malloc.h"
 #include "memory.h"
 #include "ringbuffer.h"
-#include "smp.h"
 #include "string.h"
 #include "types.h"
 #include "usb_dwc3_regs.h"
@@ -107,8 +106,6 @@ typedef struct dwc3_dev {
 
     void *evtbuffer;
     u32 evt_buffer_offset;
-    bool in_events;
-    volatile int events_cpu; // the CPU walking the event buffer, -1 for none
 
     void *scratchpad;
     void *xferbuffer;
@@ -1086,23 +1083,14 @@ void usb_dwc3_handle_events(dwc3_dev_t *dev)
         return;
 
     /*
-     * Both CDC pipes share this event buffer. A second walk, nested (a printf from an
-     * event handler that ends up here again) or from another CPU on the other pipe's
-     * iodev lock, would handle events twice and ack more than GEVNTCOUNT holds.
+     * No guard against a second walk here (upstream has none): one that returned while
+     * another CPU walked left a writer spinning in usb_dwc3_queue() under the console
+     * lock, while the walker's own print waited for that lock. The input wedges after an
+     * idle spell came from it.
      */
-    if (mmu_active()) {
-        if (__atomic_exchange_n(&dev->in_events, true, __ATOMIC_ACQUIRE))
-            return;
-    } else {
-        if (dev->in_events)
-            return;
-        dev->in_events = true;
-    }
-    dev->events_cpu = smp_id();
-
     u32 n_events = read32(dev->regs + DWC3_GEVNTCOUNT(0)) / sizeof(union dwc3_event);
     if (n_events == 0)
-        goto out;
+        return;
 
     dma_rmb();
 
@@ -1115,13 +1103,6 @@ void usb_dwc3_handle_events(dwc3_dev_t *dev)
     }
 
     write32(dev->regs + DWC3_GEVNTCOUNT(0), sizeof(union dwc3_event) * n_events);
-
-out:
-    dev->events_cpu = -1;
-    if (mmu_active())
-        __atomic_store_n(&dev->in_events, false, __ATOMIC_RELEASE);
-    else
-        dev->in_events = false;
 }
 
 void usb_dwc3_set_lossy(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, bool lossy)
@@ -1400,10 +1381,6 @@ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf, 
         if (count) {
             // a lossy pipe gets one chance for the host to drain, then drops the rest
             if (dev->pipe[pipe].lossy && tries++)
-                break;
-            // written from inside an event handler on this CPU (a printf there): the
-            // events that would drain the ring wait for us, so waiting is a deadlock
-            if (dev->in_events && dev->events_cpu == smp_id())
                 break;
             usb_dwc3_handle_events(dev);
             usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
