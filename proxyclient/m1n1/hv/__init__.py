@@ -464,15 +464,31 @@ class HV(Reloadable):
         self.u.inst(0xd50c83df) # tlbi vmalls12e1is
         self.dirty_maps.clear()
 
+    @staticmethod
+    def link_lost(e):
+        '''The proxy link is gone (target reset, cable): nothing left to talk to'''
+        import errno, serial
+        while e is not None:
+            if isinstance(e, serial.SerialException):
+                return True
+            if isinstance(e, OSError) and e.errno in (errno.EIO, errno.ENODEV, errno.ENXIO):
+                return True
+            e = e.__cause__ or e.__context__
+        return False
+
     def shellwrap(self, func, description, update=None, needs_ret=False):
 
         while True:
             try:
                 return func()
             except Exception as e:
+                # a dead link has no shell to offer: end run_guest so bench-guest can park
+                if self.link_lost(e):
+                    print(f"Exception in {description}: proxy link lost ({type(e).__name__}: {e}), exiting")
+                    raise SystemExit(1)
                 # HV_TRACER_NOSHELL=1: a tracer that cannot parse something must not
                 # park the guest in a shell (the target's watchdog resets it).
-                if not needs_ret and os.environ.get("HV_TRACER_NOSHELL"):
+                if not needs_ret and os.environ.get("HV_TRACER_NOSHELL", "0") not in ("", "0"):
                     print(f"Exception in {description} (skipped): {type(e).__name__}: {e}")
                     return
                 print(f"Exception in {description}")

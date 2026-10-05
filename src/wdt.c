@@ -2,6 +2,7 @@
 
 #include "wdt.h"
 #include "adt.h"
+#include "string.h"
 #include "types.h"
 #include "utils.h"
 
@@ -20,9 +21,12 @@
 #define WDT_CTRL_ARMED     (WDT_CTRL_IRQ_EN | WDT_CTRL_RESET_EN)
 
 static u64 wdt_base = 0;
+static u64 wdt_2nd = 0; // the secondary watchdog's control word (wdt-version 2/3)
 static u32 wdt_saved_cur[WDT_N];
 static u32 wdt_saved_ctrl[WDT_N];
 static u32 wdt_saved_bite1;
+static u32 wdt_saved_2nd;
+static u32 wdt_shown[WDT_N + 1] = {~0u, ~0u, ~0u, ~0u};
 static bool wdt_frozen = false;
 
 /* The dead hand on WD1 while frozen: 170 s of the 24 MHz reference, close to the u32 limit */
@@ -53,8 +57,8 @@ void wdt_disable(void)
         return;
 
     if (wdt_version == 2 || wdt_version == 3) {
-        u64 wdt_2nd = 0;
         if (adt_get_reg(adt, path, "reg", 2, &wdt_2nd, NULL)) {
+            wdt_2nd = 0;
             printf("Failed to get WDT reg[2] property!\n");
             return;
         }
@@ -95,11 +99,24 @@ void wdt_freeze(void)
         wdt_saved_cur[i] = read32(wdt_base + WDT_CUR(i));
     }
 
+    // the secondary watchdog m1n1 disables at boot: 0 is off there too
+    wdt_saved_2nd = wdt_2nd ? read32(wdt_2nd) : 0;
+    if (wdt_saved_2nd)
+        write32(wdt_2nd, 0);
+
     wdt_saved_bite1 = read32(wdt_base + WDT_BITE(1));
     write32(wdt_base + WDT_CUR(1), 0);
     write32(wdt_base + WDT_BITE(1), WDT_DEADHAND_TICKS);
     write32(wdt_base + WDT_CTRL(1), WDT_CTRL_RESET_EN);
     wdt_frozen = true;
+
+    // which watchdogs the guest had armed, once per change (this runs on every trap)
+    u32 now[WDT_N + 1] = {wdt_saved_ctrl[0], wdt_saved_ctrl[1], wdt_saved_ctrl[2], wdt_saved_2nd};
+    if (memcmp(now, wdt_shown, sizeof(now))) {
+        memcpy(wdt_shown, now, sizeof(now));
+        printf("WDT freeze: ctrl WD0 %x WD1 %x WD2 %x, secondary %x, WD1 bite %x\n", now[0],
+               now[1], now[2], now[3], wdt_saved_bite1);
+    }
 }
 
 void wdt_pet(void)
@@ -127,6 +144,9 @@ void wdt_thaw(void)
     if (!wdt_frozen)
         return;
     wdt_release_deadhand();
+
+    if (wdt_saved_2nd)
+        write32(wdt_2nd, wdt_saved_2nd);
 
     for (int i = 0; i < WDT_N; i++) {
         u32 ctrl = wdt_saved_ctrl[i];

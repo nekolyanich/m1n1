@@ -159,6 +159,8 @@ class AFKEp(EP):
         try:
             return self.Send(msg)
         except Exception as e:
+            if hv.link_lost(e):
+                raise
             # a ring we cannot follow must not stop the guest: resync to the wptr
             self.log(f">TX ring lost ({type(e).__name__}: {e}), resync")
             self.txbuf.rptr = self.txbuf.get_wptr()
@@ -170,11 +172,19 @@ class AFKEp(EP):
         self.log(f"<RX msg:{msg}")
         if getattr(self.rxbuf, "watched", False):
             return True
-        for data in self.rxbuf.read():
-            if self.state.verbose >= 3:
-                self.log(f"<RX rptr={self.rxbuf.state.rptr:#x}")
-                chexdump(data, print_fn=self.log)
-            self.handle_ipc(data, dir="<")
+        try:
+            for data in self.rxbuf.read():
+                if self.state.verbose >= 3:
+                    self.log(f"<RX rptr={self.rxbuf.state.rptr:#x}")
+                    chexdump(data, print_fn=self.log)
+                self.handle_ipc(data, dir="<")
+        except Exception as e:
+            if hv.link_lost(e):
+                raise
+            # as Send85: a ring we cannot follow must not stop the guest, resync to the wptr
+            self.log(f"<RX ring lost at rptr {self.rxbuf.rptr:#x} ({type(e).__name__}: {e}), resync")
+            self.rxbuf.rptr = self.rxbuf.get_wptr()
+            self.rxbuf.update_rptr(self.rxbuf.rptr)
         return True
 
     def handle_ipc(self, data, dir=None):

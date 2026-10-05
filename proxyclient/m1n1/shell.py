@@ -20,6 +20,7 @@ class HistoryConsole(code.InteractiveConsole):
         self.init_history(histfile)
         self.poll_func = None
         self.keepalive = None
+        self.link_dead = False
         self._io = threading.Lock()
         self._io.acquire()
 
@@ -28,10 +29,17 @@ class HistoryConsole(code.InteractiveConsole):
         self._io.release()
         try:
             return super().raw_input(prompt)
+        except (KeyboardInterrupt, SystemExit):
+            # a plain SystemExit, not ExitConsole: run_guest ends instead of resuming
+            if self.link_dead:
+                print("\nproxy link lost, leaving the shell")
+                raise SystemExit(1)
+            raise
         finally:
             self._io.acquire()
 
     def keepalive_loop(self, stop, interval=30):
+        import errno, serial, signal
         while not stop.wait(interval):
             with self._io:
                 if stop.is_set():
@@ -40,6 +48,12 @@ class HistoryConsole(code.InteractiveConsole):
                     self.keepalive()
                 except Exception as e:
                     print(f"shell keepalive failed: {e!r}")
+                    # the target is gone: a real signal gets the prompt out of input()
+                    # (the HV shell turns SIGUSR2 into an exit, raw_input into SystemExit)
+                    if isinstance(e, serial.SerialException) or (
+                            isinstance(e, OSError) and e.errno in (errno.EIO, errno.ENODEV)):
+                        self.link_dead = True
+                        os.kill(os.getpid(), signal.SIGUSR2)
                     return
 
     def init_history(self, histfile):
