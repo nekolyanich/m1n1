@@ -121,6 +121,7 @@ void hv_smcwd_thaw(void);
 int hv_watch_start(int cpu, u64 log, u64 size, u64 flags);
 int hv_watch_add(u32 id, u64 desc);
 int hv_watch_probe(u32 id, u64 desc);
+int hv_watch_nhi(u32 id, u64 desc);
 void hv_watch_stop(void);
 
 #define hv_panic(fmt, ...)                                                                         \

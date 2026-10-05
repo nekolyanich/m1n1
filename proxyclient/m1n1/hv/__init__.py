@@ -119,6 +119,7 @@ class HV(Reloadable):
         self.watch_log = None
         self.watch_rings = {}
         self.watch_probes = {}
+        self.watch_nhis = {}
         self._watch_pending = []
         # MMIO probes only with run_guest --watch-mmio; otherwise the watcher reads RAM only
         self.watch_mmio_allowed = False
@@ -389,6 +390,7 @@ class HV(Reloadable):
         if self._watch_meta_dirty:
             meta = {"rings": {str(k): v for k, v in self.watch_rings.items()},
                     "probes": {str(k): v for k, v in self.watch_probes.items()},
+                    "nhi": {str(k): v for k, v in self.watch_nhis.items()},
                     "lost_bytes": self._watch_lost}
             with open(os.path.splitext(self.watch_stream)[0] + ".json", "w") as f:
                 json.dump(meta, f)
@@ -414,6 +416,65 @@ class HV(Reloadable):
                 raise
             print(f"HV watch: drain failed ({type(e).__name__}: {e}), streaming off")
             self.watch_stream = None
+
+    def watch_nhi(self, id, dart, stream, desc_iova, rx, name=None):
+        '''Have the watcher follow an NHI ring's descriptors at desc_iova (up to the end of
+        their 16K page) and copy each frame a changed descriptor points to. Reads the
+        DART's TCR/TTBR once, now: call it only while the device behind it is up.
+        hv.watch_nhis keeps id -> (name, rx)'''
+        if self.watch_log is None:
+            return False
+        d = dart.dart
+        page_left = 0x4000 - (desc_iova & 0x3fff)
+        segs = dart.iotranslate(stream, desc_iova, page_left)
+        if not segs or segs[0][0] is None:
+            print(f"HV watch: NHI ring {id:#x}: descriptors at iova {desc_iova:#x} not mapped")
+            return False
+        desc_pa, seglen = segs[0]
+        ndesc = min(seglen // 16, 1024)
+
+        def field_mask(cls):
+            msb, lsb = cls.OFFSET if isinstance(cls.OFFSET, tuple) else (cls.OFFSET, cls.OFFSET)
+            return ((1 << (msb - lsb + 1)) - 1) << lsb
+
+        if type(d).__name__ == "DART8110":
+            from ..hw.dart8110 import PTE
+            tcr = d.regs.TCR[stream].reg
+            ttbr = d.regs.TTBR[stream].reg
+            if not ttbr.VALID:
+                print(f"HV watch: NHI ring {id:#x}: TTBR of stream {stream} not valid")
+                return False
+            if tcr.FOUR_LEVELS:
+                l0 = ttbr.ADDR << 14
+                l1s = []
+                for i in range(4):
+                    pte = PTE(self.p.read64(l0 + 8 * i))
+                    l1s.append(pte.OFFSET << 14 if pte.VALID else 0)
+            else:
+                l1s = [ttbr.ADDR << 14] * 4
+            pte_mask = field_mask(PTE)
+        else:
+            # DART8020/T6000: 32-bit IOVAs, one level-1 table behind TTBR[stream, 0]
+            ttbr = d.regs.TTBR[stream, 0].reg
+            if not ttbr.VALID:
+                print(f"HV watch: NHI ring {id:#x}: TTBR of stream {stream} not valid")
+                return False
+            l1s = [ttbr.ADDR << 12] * 4
+            pte_mask = field_mask(d.ptecls)
+
+        desc = struct.pack("<IIQ4QQ", id, ndesc, desc_pa, *l1s, pte_mask)
+        if getattr(self, "_watch_ndesc", None) is None:
+            self._watch_ndesc = self.u.heap.malloc(len(desc))
+        self.iface.writemem(self._watch_ndesc, desc)
+        ret = self.p.hv_watch_nhi(id, self._watch_ndesc)
+        if ret != 0:
+            print(f"HV watch: NHI ring {id:#x} refused ({ret - (1 << 64) if ret >> 63 else ret})")
+            return False
+        self.watch_nhis[id] = (name or f"nhi{id:#x}", bool(rx))
+        self._watch_meta_dirty = True
+        self.log(f"HV watch: NHI ring {id:#x} {name} iova {desc_iova:#x} -> {desc_pa:#x} x{ndesc}, "
+                 f"l1 {[hex(a) for a in l1s]}, pte mask {pte_mask:#x}")
+        return True
 
     WATCH_MAX_GATES = 6
 

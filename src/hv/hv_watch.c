@@ -29,7 +29,38 @@ enum {
     WATCH_REC_BAD = 4,   // ring header no longer makes sense, ring dropped: a = rptr, b = wptr
     WATCH_REC_MMIO = 5,  // probe word changed: a = byte offset, b = new value
     WATCH_REC_GATE = 6,  // probe power changed: a = 1 on / 0 off, b = the PS value that decided
+    WATCH_REC_NHI = 7,   // NHI ring descriptor changed: a = index, b = PA of the frame (low
+                         // 32 bits, 0: untranslatable), data = 16-byte descriptor + frame
+    WATCH_REC_NHI_ARM = 8, // NHI ring armed: a = descriptors, b = 0
 };
+
+/*
+ * NHI rings (USB4 control channel): descriptor arrays and frames live in RAM behind
+ * the NHI's DART. A descriptor that changes is a frame posted (TX: by the AP) or
+ * completed (RX: by the NHI); the frame is found by walking the DART's two-level
+ * tables, which are RAM too. No register of the NHI or the DART is read here.
+ */
+#define WATCH_MAX_NHI 4
+#define WATCH_NHI_MAX_DESC 1024
+#define WATCH_NHI_FRAME 512
+
+struct hv_watch_nhi_desc {
+    u32 id;
+    u32 ndesc;
+    u64 desc_pa;  // the descriptor array, 16 bytes each, physically contiguous
+    u64 l1[4];    // DART level-1 table per IOVA bits 37:36 (0: none)
+    u64 pte_mask; // PTE bits holding the page number (PA >> 14)
+};
+
+struct watch_nhi {
+    struct hv_watch_nhi_desc d;
+    bool fresh;
+    u8 shadow[WATCH_NHI_MAX_DESC * 16];
+};
+
+static struct watch_nhi watch_nhis[WATCH_MAX_NHI];
+static volatile bool watch_nhi_on[WATCH_MAX_NHI];
+static u8 watch_nhi_rec[16 + WATCH_NHI_FRAME];
 
 /*
  * MMIO probes: a few 32-bit registers read every period_us, logged only when they
@@ -290,12 +321,80 @@ static void watch_probe_poll(int i, u64 now)
     p->valid = true;
 }
 
+static u64 watch_pte_page(struct watch_nhi *n, u64 pte)
+{
+    u64 mask = n->d.pte_mask;
+    return ((pte & mask) >> __builtin_ctzll(mask)) << 14;
+}
+
+/* IOVA -> PA through the DART tables in RAM, 0 if not mapped */
+static u64 watch_iova2pa(struct watch_nhi *n, u64 iova)
+{
+    u64 l1 = n->d.l1[(iova >> 36) & 3];
+    if (!l1)
+        return 0;
+    u64 p = l1 + 8 * ((iova >> 25) & 0x7ff);
+    if (!watch_in_ram(p, 8))
+        return 0;
+    u64 pte = read64(p);
+    if (!(pte & 1))
+        return 0;
+    p = watch_pte_page(n, pte) + 8 * ((iova >> 14) & 0x7ff);
+    if (!watch_in_ram(p, 8))
+        return 0;
+    pte = read64(p);
+    if (!(pte & 1))
+        return 0;
+    return watch_pte_page(n, pte) | (iova & 0x3fff);
+}
+
+static void watch_nhi_poll(int i)
+{
+    struct watch_nhi *n = &watch_nhis[i];
+    u8 desc[16];
+
+    if (n->fresh) {
+        memcpy(n->shadow, (void *)n->d.desc_pa, 16 * n->d.ndesc);
+        watch_emit(WATCH_REC_NHI_ARM, n->d.id, n->d.ndesc, 0, NULL, 0);
+        n->fresh = false;
+        return;
+    }
+
+    for (u32 k = 0; k < n->d.ndesc; k++) {
+        memcpy(desc, (void *)(n->d.desc_pa + 16 * k), 16);
+        if (!memcmp(desc, n->shadow + 16 * k, 16))
+            continue;
+        memcpy(n->shadow + 16 * k, desc, 16);
+        sysop("dmb ld");
+
+        u64 iova = *(u64 *)desc;
+        u32 len = (*(u32 *)(desc + 8)) & 0xfff;
+        if (!len)
+            len = 4096;
+        len = min(len, (u32)WATCH_NHI_FRAME);
+        u64 pa = watch_iova2pa(n, iova);
+        // a frame never crosses its 16K page in the NHI's pool; never read past one
+        if (pa && (pa & 0x3fff) + len > 0x4000)
+            len = 0x4000 - (pa & 0x3fff);
+        if (!pa || !watch_in_ram(pa, len))
+            len = 0;
+
+        memcpy(watch_nhi_rec, desc, 16);
+        if (len)
+            memcpy(watch_nhi_rec + 16, (void *)pa, len);
+        watch_emit(WATCH_REC_NHI, n->d.id, k, pa, watch_nhi_rec, 16 + len);
+    }
+}
+
 static void hv_watch_main(void)
 {
     while (hv_watch_active) {
         for (int i = 0; i < WATCH_MAX_RINGS; i++)
             if (watch_ring_on[i])
                 watch_poll(i);
+        for (int i = 0; i < WATCH_MAX_NHI; i++)
+            if (watch_nhi_on[i])
+                watch_nhi_poll(i);
         u64 now = mrs(CNTPCT_EL0);
         for (int i = 0; i < WATCH_MAX_PROBES; i++)
             if (watch_probe_on[i])
@@ -325,6 +424,8 @@ int hv_watch_start(int cpu, u64 log, u64 size, u64 flags)
         watch_ring_on[i] = false;
     for (int i = 0; i < WATCH_MAX_PROBES; i++)
         watch_probe_on[i] = false;
+    for (int i = 0; i < WATCH_MAX_NHI; i++)
+        watch_nhi_on[i] = false;
     sysop("dsb ish");
 
     hv_watch_cpu = cpu;
@@ -389,6 +490,51 @@ int hv_watch_add(u32 id, u64 desc)
     r->fresh = true;
     sysop("dsb ish");
     watch_ring_on[slot] = true;
+    sysop("dsb ish");
+    return 0;
+}
+
+/* Arm (or re-arm) the NHI ring with the given id; desc == 0 drops it. RAM only. */
+int hv_watch_nhi(u32 id, u64 desc)
+{
+    if (!hv_watch_active)
+        return -1;
+
+    int slot = -1;
+    for (int i = 0; i < WATCH_MAX_NHI; i++) {
+        if (watch_nhi_on[i] && watch_nhis[i].d.id == id) {
+            watch_nhi_on[i] = false;
+            slot = i;
+        }
+    }
+    watch_sync();
+    if (!desc)
+        return 0;
+
+    if (slot < 0)
+        for (int i = 0; i < WATCH_MAX_NHI; i++)
+            if (!watch_nhi_on[i]) {
+                slot = i;
+                break;
+            }
+    if (slot < 0)
+        return -2;
+
+    struct hv_watch_nhi_desc d;
+    memcpy(&d, (void *)desc, sizeof(d));
+    if (!d.ndesc || d.ndesc > WATCH_NHI_MAX_DESC || !d.pte_mask ||
+        !watch_in_ram(d.desc_pa, 16 * d.ndesc))
+        return -3;
+    for (int i = 0; i < 4; i++)
+        if (d.l1[i] && !watch_in_ram(d.l1[i], 0x4000))
+            return -4;
+
+    struct watch_nhi *n = &watch_nhis[slot];
+    n->d = d;
+    n->d.id = id;
+    n->fresh = true;
+    sysop("dsb ish");
+    watch_nhi_on[slot] = true;
     sysop("dsb ish");
     return 0;
 }
