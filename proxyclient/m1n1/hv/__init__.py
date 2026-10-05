@@ -425,6 +425,10 @@ class HV(Reloadable):
         if self.watch_log is None:
             return False
         d = dart.dart
+        # iotranslate re-reads a cached table only for an invalid PTE; after a replug the
+        # same IOVA is valid again but on a new page, and a re-arm took the old PA
+        if hasattr(d, "pt_cache"):
+            d.pt_cache.clear()
         page_left = 0x4000 - (desc_iova & 0x3fff)
         segs = dart.iotranslate(stream, desc_iova, page_left)
         if not segs or segs[0][0] is None:
