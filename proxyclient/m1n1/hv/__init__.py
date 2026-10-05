@@ -116,6 +116,8 @@ class HV(Reloadable):
         self.watch_rings = {}
         self.watch_probes = {}
         self._watch_pending = []
+        # MMIO probes only with run_guest --watch-mmio; otherwise the watcher reads RAM only
+        self.watch_mmio_allowed = False
         self.smp = True
         self.hook_exceptions = False
         self.sptm_mode = SPTM_MODE.SPTM_NONE
@@ -343,6 +345,9 @@ class HV(Reloadable):
         read32(addr) & mask == value; the first gate must be a PMGR device, so a raw
         register gate is itself read only in a powered block. Queued until the watcher
         starts. hv.watch_probes keeps id -> (name, addr, nwords)'''
+        if not self.watch_mmio_allowed:
+            print(f"HV watch: probe {id:#x} ({name}) refused: MMIO probes need --watch-mmio")
+            return False
         pmgr = self.adt[self.adt._pmgr_path]
         devs = {d.name: d for d in pmgr.devices}
         packed = []
@@ -2339,7 +2344,10 @@ class HV(Reloadable):
             print(f"HV watch: CPU {self.watch_cpu} already runs the HV watchdog, no watcher")
         elif self.watch_cpu is not None:
             self.watch_log = self.u.heap.malloc(self.watch_size)
-            ret = self.p.hv_watch_start(self.watch_cpu, self.watch_log, self.watch_size)
+            ret = self.p.hv_watch_start(self.watch_cpu, self.watch_log, self.watch_size,
+                                        1 if self.watch_mmio_allowed else 0)
+            print(f"HV watch: CPU {self.watch_cpu}, mode "
+                  f"{'rings+mmio' if self.watch_mmio_allowed else 'rings only'}")
             if ret != 0:
                 print(f"HV watch: could not start on CPU {self.watch_cpu} ({ret:#x})")
                 self.watch_log = None

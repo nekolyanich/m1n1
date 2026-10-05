@@ -551,7 +551,8 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             reply->retval = hv_sprr_reserve_pool(request->args[0]);
             break;
         case P_HV_WATCH_START:
-            reply->retval = hv_watch_start(request->args[0], request->args[1], request->args[2]);
+            reply->retval = hv_watch_start(request->args[0], request->args[1], request->args[2],
+                                           request->args[3]);
             break;
         case P_HV_WATCH_ADD:
             reply->retval = hv_watch_add(request->args[0], request->args[1]);

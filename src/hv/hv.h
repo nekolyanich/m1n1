@@ -110,7 +110,7 @@ void hv_wdt_breadcrumb(char c);
 void hv_do_panic(void);
 
 /* Watcher: polls AFK rings from a CPU taken from the guest */
-int hv_watch_start(int cpu, u64 log, u64 size);
+int hv_watch_start(int cpu, u64 log, u64 size, u64 flags);
 int hv_watch_add(u32 id, u64 desc);
 int hv_watch_probe(u32 id, u64 desc);
 void hv_watch_stop(void);

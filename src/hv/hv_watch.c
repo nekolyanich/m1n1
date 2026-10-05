@@ -93,8 +93,10 @@ struct hv_watch_log {
     u64 drops;  // records too big for the log
     u64 polls;  // watcher loop passes
     u64 cntfrq;
-    u64 rsvd;
+    u64 flags;  // WATCH_FLAG_*: the mode this log was taken in
 };
+
+#define WATCH_FLAG_MMIO BIT(0) // MMIO probes allowed (otherwise RAM rings only)
 
 struct watch_rec {
     u32 magic;
@@ -119,6 +121,7 @@ static struct watch_ring watch_rings[WATCH_MAX_RINGS];
 static volatile bool watch_ring_on[WATCH_MAX_RINGS];
 static volatile bool hv_watch_active = false;
 static int hv_watch_cpu = -1;
+static bool watch_allow_mmio = false;
 static struct hv_watch_log *watch_log;
 static u8 *watch_area;
 static u8 watch_buf[WATCH_MAX_DATA];
@@ -300,7 +303,7 @@ static void hv_watch_main(void)
     }
 }
 
-int hv_watch_start(int cpu, u64 log, u64 size)
+int hv_watch_start(int cpu, u64 log, u64 size, u64 flags)
 {
     if (hv_watch_active || cpu == smp_id() || !smp_is_alive(cpu))
         return -1;
@@ -314,6 +317,8 @@ int hv_watch_start(int cpu, u64 log, u64 size)
     watch_log->version = 1;
     watch_log->size = size - sizeof(*watch_log);
     watch_log->cntfrq = mrs(CNTFRQ_EL0);
+    watch_log->flags = flags & WATCH_FLAG_MMIO;
+    watch_allow_mmio = flags & WATCH_FLAG_MMIO;
     for (int i = 0; i < WATCH_MAX_RINGS; i++)
         watch_ring_on[i] = false;
     for (int i = 0; i < WATCH_MAX_PROBES; i++)
@@ -323,7 +328,8 @@ int hv_watch_start(int cpu, u64 log, u64 size)
     hv_watch_cpu = cpu;
     hv_watch_active = true;
     smp_call4(cpu, hv_watch_main, 0, 0, 0, 0);
-    printf("HV watch: CPU %d, log %#lx (%ld bytes)\n", cpu, log, size);
+    printf("HV watch: CPU %d, log %#lx (%ld bytes), %s\n", cpu, log, size,
+           watch_allow_mmio ? "rings+mmio" : "rings only");
     return 0;
 }
 
@@ -390,6 +396,9 @@ int hv_watch_probe(u32 id, u64 desc)
 {
     if (!hv_watch_active)
         return -1;
+    // a watcher started for RAM rings only never touches a register
+    if (!watch_allow_mmio)
+        return -6;
 
     int slot = -1;
     for (int i = 0; i < WATCH_MAX_PROBES; i++) {

@@ -26,6 +26,9 @@ parser.add_argument('--hv-wdt', type=int, metavar='CPU', default=None,
 parser.add_argument('--watch', type=int, metavar='CPU', default=None,
                     help='Take CPU from the guest and poll AFK rings on it (hv_watch.c); '
                          'tracers arm rings with hv.watch_ring()')
+parser.add_argument('--watch-mmio', action="store_true",
+                    help='Also allow the watcher to read MMIO registers (hv.watch_mmio(), gated '
+                         'on PMGR power states). Without it the watcher only ever reads RAM.')
 parser.add_argument('--strip-node', action="append", default=[], metavar='SUBSTR',
                     help='Remove every ADT node whose name contains SUBSTR.')
 parser.add_argument('-r', '--raw', action="store_true")
@@ -91,6 +94,9 @@ hv.sptm_mode = args.sptm_mode
 hv.sprr_pool_size = args.sprr_pool_size * 1024 * 1024
 hv.wdt_cpu = args.hv_wdt
 hv.watch_cpu = args.watch
+if args.watch_mmio and args.watch is None:
+    parser.error("--watch-mmio needs --watch CPU")
+hv.watch_mmio_allowed = args.watch_mmio
 
 hv.init()
 

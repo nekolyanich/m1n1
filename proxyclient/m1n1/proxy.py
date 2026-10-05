@@ -1168,8 +1168,8 @@ class M1N1Proxy(Reloadable):
 
     def hv_sprr_reserve_pool(self, size):
         return self.request(self.P_HV_SPRR_RESERVE_POOL, size)
-    def hv_watch_start(self, cpu, log, size):
-        return self.request(self.P_HV_WATCH_START, cpu, log, size)
+    def hv_watch_start(self, cpu, log, size, flags=0):
+        return self.request(self.P_HV_WATCH_START, cpu, log, size, flags)
     def hv_watch_add(self, id, desc):
         return self.request(self.P_HV_WATCH_ADD, id, desc)
     def hv_watch_stop(self):
