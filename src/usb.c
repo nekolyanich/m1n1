@@ -399,6 +399,8 @@ void usb_iodev_vuart_setup(iodev_id_t iodev)
         return;
 
     iodev_usb_vuart.opaque = iodev_get_opaque(iodev);
+    // the guest console must never stall the HV on a host that does not read it
+    usb_dwc3_set_lossy(iodev_usb_vuart.opaque, CDC_ACM_PIPE_1, true);
 }
 
 int usb_enable_debugusb(void)
