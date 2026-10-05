@@ -33,13 +33,21 @@ enum {
 
 /*
  * MMIO probes: a few 32-bit registers read every period_us, logged only when they
- * change. A read of a block that is powered off can hang the bus, so a probe has
- * PMGR PS registers as gates and is read only while all of them say "on" (actual
- * state, bits 7:4 == 0xf); the gates are re-read right before every word.
+ * change. A read of a block that is powered off or held in reset can hang the bus
+ * or abort, so a probe has gates, read in order and all re-read right before every
+ * word: (read32(addr) & mask) == value. PMGR PS registers come first (actual state
+ * on: mask 0xf0, value 0xf0), so that a later gate in the same block, such as the
+ * RUN bit of a co-processor, is itself only read while that block is powered.
  */
 #define WATCH_MAX_PROBES 16
 #define WATCH_PROBE_WORDS 16
-#define WATCH_MAX_GATES 4
+#define WATCH_MAX_GATES 6
+
+struct watch_gate {
+    u64 addr;
+    u32 mask;
+    u32 value;
+};
 
 struct hv_watch_probe_desc {
     u32 id;
@@ -47,7 +55,7 @@ struct hv_watch_probe_desc {
     u32 period_us;
     u32 ngates;
     u64 addr;
-    u64 gates[WATCH_MAX_GATES];
+    struct watch_gate gates[WATCH_MAX_GATES];
 };
 
 struct watch_probe {
@@ -238,12 +246,12 @@ static void watch_poll(int i)
     }
 }
 
-/* All gates on? *ps gets the first PS value that is not, or the last one read */
+/* All gates open, in order? *ps gets the first value that is not, or the last one read */
 static bool watch_gates_on(struct watch_probe *p, u32 *ps)
 {
     for (u32 i = 0; i < p->d.ngates; i++) {
-        *ps = read32(p->d.gates[i]);
-        if (((*ps >> 4) & 0xf) != 0xf)
+        *ps = read32(p->d.gates[i].addr);
+        if ((*ps & p->d.gates[i].mask) != p->d.gates[i].value)
             return false;
     }
     return true;
@@ -411,7 +419,7 @@ int hv_watch_probe(u32 id, u64 desc)
         watch_in_ram(d.addr, 4 * d.nwords))
         return -3;
     for (u32 i = 0; i < d.ngates; i++)
-        if ((d.gates[i] & 3) || watch_in_ram(d.gates[i], 4))
+        if ((d.gates[i].addr & 3) || watch_in_ram(d.gates[i].addr, 4) || !d.gates[i].mask)
             return -4;
 
     struct watch_probe *p = &watch_probes[slot];

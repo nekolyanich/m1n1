@@ -334,29 +334,40 @@ class HV(Reloadable):
         self.log(f"HV watch: ring {id:#x} {name} iova {iova:#x} blk {blk:#x} size {bufsize:#x} -> {segs}")
         return True
 
+    WATCH_MAX_GATES = 6
+
     def watch_mmio(self, id, addr, nwords, gates, period_us=100, name=None):
         '''Have the watcher read nwords 32-bit registers at addr every period_us and log
-        changes, only while every PMGR device named in gates is on. Queued until the
-        watcher starts. hv.watch_probes keeps id -> (name, addr, nwords)'''
+        changes, only while every gate is open, checked in order. A gate is a PMGR
+        device name (open while on) or (addr, mask, value), open while
+        read32(addr) & mask == value; the first gate must be a PMGR device, so a raw
+        register gate is itself read only in a powered block. Queued until the watcher
+        starts. hv.watch_probes keeps id -> (name, addr, nwords)'''
         pmgr = self.adt[self.adt._pmgr_path]
         devs = {d.name: d for d in pmgr.devices}
-        gate_addrs = []
+        packed = []
         for g in gates:
-            if g not in devs:
-                print(f"HV watch: probe {id:#x}: no PMGR device {g}, not armed")
+            if isinstance(g, str):
+                if g not in devs:
+                    print(f"HV watch: probe {id:#x}: no PMGR device {g}, not armed")
+                    return False
+                a = self.adt.pmgr_dev_get_addr(devs[g])
+                # the GPU's own PMGR belongs to its firmware: reading it took the machine down
+                if a >> 24 == 0x404:
+                    print(f"HV watch: probe {id:#x}: {g} is in the GPU PMGR, not armed")
+                    return False
+                packed.append((a, 0xf0, 0xf0))
+            elif packed:
+                packed.append(tuple(g))
+            else:
+                print(f"HV watch: probe {id:#x}: the first gate must be a PMGR device")
                 return False
-            a = self.adt.pmgr_dev_get_addr(devs[g])
-            # the GPU's own PMGR belongs to its firmware: reading it took the machine down
-            if a >> 24 == 0x404:
-                print(f"HV watch: probe {id:#x}: {g} is in the GPU PMGR, not armed")
-                return False
-            gate_addrs.append(a)
-        if not gate_addrs or len(gate_addrs) > 4 or not 1 <= nwords <= 16:
-            print(f"HV watch: probe {id:#x}: needs 1-4 gates and 1-16 words")
+        if not packed or len(packed) > self.WATCH_MAX_GATES or not 1 <= nwords <= 16:
+            print(f"HV watch: probe {id:#x}: needs 1-{self.WATCH_MAX_GATES} gates and 1-16 words")
             return False
-        desc = struct.pack("<IIIIQ", id, nwords, period_us, len(gate_addrs), addr)
-        desc += b"".join(struct.pack("<Q", a) for a in gate_addrs)
-        desc += bytes(8 * (4 - len(gate_addrs)))
+        desc = struct.pack("<IIIIQ", id, nwords, period_us, len(packed), addr)
+        desc += b"".join(struct.pack("<QII", a, m, v) for a, m, v in packed)
+        desc += bytes(16 * (self.WATCH_MAX_GATES - len(packed)))
         self.watch_probes[id] = (name or f"probe{id:#x}", addr, nwords)
         if self.watch_log is None:
             self._watch_pending.append((id, desc))
