@@ -11,8 +11,10 @@
 #include "pcie.h"
 #include "smp.h"
 #include "string.h"
+#include "uart.h"
 #include "usb.h"
 #include "utils.h"
+#include "wdt.h"
 
 #define HV_TICK_RATE      1000
 #define HV_SLOW_TICK_RATE 1
@@ -661,8 +663,12 @@ void hv_tick(struct exc_info *ctx)
     }
     if (hv_host_beats && is_boot_cpu() &&
         mrs(CNTPCT_EL0) - hv_host_seen > HV_HOST_TIMEOUT_S * mrs(CNTFRQ_EL0)) {
-        printf("HV: no heartbeat from the host for %d s, rebooting\n", HV_HOST_TIMEOUT_S);
-        flush_and_reboot();
+        // nothing over USB: the link may be what died, and a console flush into it hung
+        // here until the HV watchdog and the WD1 dead hand reset the machine 170 s later
+        uart_puts("HV: no heartbeat from the host, rebooting");
+        wdt_reboot();
+        while (1)
+            sysop("wfi");
     }
     hv_vuart_poll();
 }
