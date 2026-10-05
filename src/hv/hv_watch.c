@@ -33,6 +33,10 @@ enum {
     WATCH_REC_NHI = 7,   // NHI ring descriptor changed: a = index, b = PA of the frame (low
                          // 32 bits, 0: untranslatable), data = 16-byte descriptor + frame
     WATCH_REC_NHI_ARM = 8, // NHI ring armed: a = descriptors, b = 0
+    WATCH_REC_NHI_DB = 9,  // NHI doorbell: as NHI, taken in the trap on the guest's write
+                           // of the ring index; RX: descriptor already re-posted (w2 is not
+                           // the frame's), the frame itself is whole
+    WATCH_REC_NHI_STAT = 10, // a = other traps on the doorbell page, b = doorbells so far
 };
 
 /*
@@ -53,6 +57,7 @@ struct hv_watch_nhi_desc {
     u64 pte_mask; // PTE bits holding the page number (PA >> 14)
     u64 l0;       // three levels (t8110 FOUR_LEVELS): the level-0 table, l1[] unused
     u64 rx;       // an RX ring: the NHI rewrites a descriptor for every frame it fills
+    u64 doorbell; // the ring's prod/cons register (+8): trapped in C, no polling (0: poll)
 };
 
 /*
@@ -74,6 +79,10 @@ struct watch_nhi {
     bool fresh;
     u32 nbufs;
     u32 evict; // the next buffer to give up once all are taken
+    bool have_last;
+    u32 last;      // doorbell: the index the guest wrote last time
+    u32 doorbells; // doorbell writes trapped
+    u32 other;     // other accesses to the doorbell's register page, trapped too
     struct watch_nhi_buf bufs[WATCH_NHI_BUFS];
     u8 shadow[WATCH_NHI_MAX_DESC * 16];
 };
@@ -198,8 +207,12 @@ static void watch_put(const void *src, u64 len)
     }
 }
 
+/* The watcher CPU and the guest CPUs (NHI doorbell traps) both append to the log */
+static DECLARE_SPINLOCK(watch_lock);
+
 static void watch_emit(int type, u32 id, u32 a, u32 b, const void *data, u32 len)
 {
+    spin_lock(&watch_lock);
     struct watch_rec r = {
         .magic = WATCH_REC_MAGIC,
         .type = type,
@@ -214,6 +227,7 @@ static void watch_emit(int type, u32 id, u32 a, u32 b, const void *data, u32 len
 
     if (total > watch_log->size / 4) {
         watch_log->drops++;
+        spin_unlock(&watch_lock);
         return;
     }
 
@@ -222,6 +236,7 @@ static void watch_emit(int type, u32 id, u32 a, u32 b, const void *data, u32 len
     watch_put(data, len);
     watch_put(zero, total - sizeof(r) - len);
     sysop("dmb ish");
+    spin_unlock(&watch_lock);
 }
 
 /* Copy [off, off + len) of the ring region, walking the physical segments */
@@ -471,7 +486,7 @@ static void hv_watch_main(void)
             if (watch_ring_on[i])
                 watch_poll(i);
         for (int i = 0; i < WATCH_MAX_NHI; i++)
-            if (watch_nhi_on[i])
+            if (watch_nhi_on[i] && !watch_nhis[i].d.doorbell)
                 watch_nhi_poll(i);
         u64 now = mrs(CNTPCT_EL0);
         for (int i = 0; i < WATCH_MAX_PROBES; i++)
@@ -573,6 +588,79 @@ int hv_watch_add(u32 id, u64 desc)
 }
 
 /* Arm (or re-arm) the NHI ring with the given id; desc == 0 drops it. RAM only. */
+/*
+ * NHI doorbells: the guest's write of a ring index, trapped in C on the guest's CPU.
+ * TX: the new producer index; descriptors and frames up to it are complete. RX: the
+ * new consumer index re-posts buffers; until this write reaches the NHI it cannot
+ * refill them, so the frames the guest just took are still whole in them. The write
+ * goes through to the NHI after the capture.
+ */
+/* Outside the log lock: the frame goes to the caller's buffer, only the append locks */
+static void watch_nhi_capture(struct watch_nhi *n, u32 idx)
+{
+    u8 rec[16 + WATCH_NHI_FRAME];
+    u64 dpa = n->d.desc_pa + 16 * idx;
+    watch_fresh(dpa, 16);
+    memcpy(rec, (void *)dpa, 16);
+
+    u64 iova = *(u64 *)rec;
+    u32 len = n->d.rx ? WATCH_NHI_FRAME : (*(u32 *)(rec + 8)) & 0xfff;
+    if (!len)
+        len = 4096;
+    len = min(len, (u32)WATCH_NHI_FRAME);
+    u64 pa = watch_iova2pa(n, iova);
+    if (pa && (pa & 0x3fff) + len > 0x4000)
+        len = 0x4000 - (pa & 0x3fff);
+    if (!pa || !watch_in_ram(pa, len))
+        len = 0;
+    if (len) {
+        watch_fresh(pa, len);
+        memcpy(rec + 16, (void *)pa, len);
+    }
+    watch_emit(WATCH_REC_NHI_DB, n->d.id, idx, pa, rec, 16 + len);
+}
+
+/*
+ * The hook covers the ring's register page from the doorbell on (the base, +0..+7,
+ * is Python's arming hook), so every other access to that page comes through here
+ * too and is counted: the page traps for the guest either way once part of it does.
+ */
+static bool watch_nhi_doorbell(struct exc_info *ctx, u64 ipa, u64 *val, bool write, int width)
+{
+    struct watch_nhi *n = NULL;
+    u64 page = ipa & ~0x3fffUL;
+    for (int i = 0; i < WATCH_MAX_NHI; i++)
+        if (watch_nhis[i].d.doorbell && (watch_nhis[i].d.doorbell & ~0x3fffUL) == page)
+            n = &watch_nhis[i];
+
+    bool doorbell = n && ipa == n->d.doorbell && write && width == 2;
+    if (n && !doorbell) {
+        // not the doorbell: count, and log the count when it crosses a power of two
+        u32 c = ++n->other;
+        if (!(c & (c - 1)) || !(c & 0xfff))
+            watch_emit(WATCH_REC_NHI_STAT, n->d.id, c, n->doorbells, NULL, 0);
+    }
+    if (doorbell && watch_nhi_on[n - watch_nhis]) {
+        n->doorbells++;
+        // ring size (+12, the next word): the NHI is up, the guest is writing to it
+        u32 size = read32(ipa + 4) & 0xffff;
+        u32 idx = n->d.rx ? (*val & 0xffff) : ((*val >> 16) & 0xffff);
+        if (size && size <= n->d.ndesc && idx < size) {
+            // only the index bookkeeping under the lock; frames are read outside it
+            spin_lock(&watch_lock);
+            u32 from = n->have_last ? n->last : (idx + size - 1) % size;
+            n->last = idx;
+            n->have_last = true;
+            spin_unlock(&watch_lock);
+            for (u32 k = 0; from != idx && k < size; k++) {
+                watch_nhi_capture(n, from);
+                from = (from + 1) % size;
+            }
+        }
+    }
+    return hv_pa_rw(ctx, ipa, val, write, width);
+}
+
 int hv_watch_nhi(u32 id, u64 desc)
 {
     if (!hv_watch_active)
@@ -608,13 +696,28 @@ int hv_watch_nhi(u32 id, u64 desc)
             return -4;
     if (d.l0 && !watch_in_ram(d.l0, 0x4000))
         return -4;
+    // the doorbell is an NHI register, never RAM; the hook runs to the end of its page
+    if (d.doorbell && ((d.doorbell & 7) || watch_in_ram(d.doorbell, 8)))
+        return -5;
 
     struct watch_nhi *n = &watch_nhis[slot];
     n->d = d;
     n->d.id = id;
     n->nbufs = 0;
     n->evict = 0;
+    n->have_last = false;
+    n->doorbells = 0;
+    n->other = 0;
     n->fresh = true;
+    if (d.doorbell) {
+        u64 end = (d.doorbell | 0x3fffUL) + 1;
+        if (hv_map_hook(d.doorbell, watch_nhi_doorbell, end - d.doorbell) < 0)
+            return -6;
+        sysop("dsb ishst");
+        sysop("tlbi vmalls12e1is");
+        sysop("dsb ish");
+        sysop("isb");
+    }
     sysop("dsb ish");
     watch_nhi_on[slot] = true;
     sysop("dsb ish");

@@ -417,7 +417,7 @@ class HV(Reloadable):
             print(f"HV watch: drain failed ({type(e).__name__}: {e}), streaming off")
             self.watch_stream = None
 
-    def watch_nhi(self, id, dart, stream, desc_iova, rx, name=None):
+    def watch_nhi(self, id, dart, stream, desc_iova, rx, name=None, doorbell=None):
         '''Have the watcher follow an NHI ring's descriptors at desc_iova (up to the end of
         their 16K page) and copy each frame a changed descriptor points to. Reads the
         DART's TCR/TTBR once, now: call it only while the device behind it is up.
@@ -462,13 +462,27 @@ class HV(Reloadable):
             l1s = [ttbr.ADDR << 12] * 4
             pte_mask = field_mask(d.ptecls)
 
-        desc = struct.pack("<IIQ4QQQQ", id, ndesc, desc_pa, *l1s, pte_mask, l0, int(bool(rx)))
+        desc = struct.pack("<IIQ4QQQQQ", id, ndesc, desc_pa, *l1s, pte_mask, l0, int(bool(rx)),
+                           doorbell or 0)
         if getattr(self, "_watch_ndesc", None) is None:
             self._watch_ndesc = self.u.heap.malloc(len(desc))
         self.iface.writemem(self._watch_ndesc, desc)
+        # doorbell: m1n1 hooks the rest of that register page in C; keep pt_update off it
+        hooked = None
+        if doorbell:
+            hooked = irange(doorbell, ((doorbell | 0x3fff) + 1) - doorbell)
+            if (hooked.start, name) not in getattr(self, "_watch_db_reserved", set()):
+                self.add_tracer(hooked, f"WATCH {name} doorbell", TraceMode.RESERVED)
+                self._watch_db_reserved = getattr(self, "_watch_db_reserved", set())
+                self._watch_db_reserved.add((hooked.start, name))
         ret = self.p.hv_watch_nhi(id, self._watch_ndesc)
         if ret != 0:
             print(f"HV watch: NHI ring {id:#x} refused ({ret - (1 << 64) if ret >> 63 else ret})")
+            if hooked is not None:
+                # a reserved range nobody hooked is a hole in the guest's map
+                self.del_tracer(hooked, f"WATCH {name} doorbell")
+                self._watch_db_reserved.discard((hooked.start, name))
+                self.pt_update()
             return False
         self.watch_nhis[id] = (name or f"nhi{id:#x}", bool(rx))
         self._watch_meta_dirty = True
