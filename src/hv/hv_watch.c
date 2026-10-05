@@ -36,7 +36,8 @@ enum {
     WATCH_REC_NHI_DB = 9,  // NHI doorbell: as NHI, taken in the trap on the guest's write
                            // of the ring index; RX: descriptor already re-posted (w2 is not
                            // the frame's), the frame itself is whole
-    WATCH_REC_NHI_STAT = 10, // a = other traps on the doorbell page, b = doorbells so far
+    WATCH_REC_NHI_STAT = 10, // a = other traps on the doorbell page, b = doorbells so far,
+                             // data = u32 {other, doorbells, skipped, first_assumed}
 };
 
 /*
@@ -83,6 +84,8 @@ struct watch_nhi {
     u32 last;      // doorbell: the index the guest wrote last time
     u32 doorbells; // doorbell writes trapped
     u32 other;     // other accesses to the doorbell's register page, trapped too
+    u32 skipped;   // writes to the doorbell word not understood (width, offset)
+    u32 first_assumed; // 1: the first doorbell's batch was taken as one descriptor
     struct watch_nhi_buf bufs[WATCH_NHI_BUFS];
     u8 shadow[WATCH_NHI_MAX_DESC * 16];
 };
@@ -620,6 +623,12 @@ static void watch_nhi_capture(struct watch_nhi *n, u32 idx)
     watch_emit(WATCH_REC_NHI_DB, n->d.id, idx, pa, rec, 16 + len);
 }
 
+static void watch_nhi_stat(struct watch_nhi *n)
+{
+    u32 s[4] = {n->other, n->doorbells, n->skipped, n->first_assumed};
+    watch_emit(WATCH_REC_NHI_STAT, n->d.id, n->other, n->doorbells, s, sizeof(s));
+}
+
 /*
  * The hook covers the ring's register page from the doorbell on (the base, +0..+7,
  * is Python's arming hook), so every other access to that page comes through here
@@ -633,22 +642,46 @@ static bool watch_nhi_doorbell(struct exc_info *ctx, u64 ipa, u64 *val, bool wri
         if (watch_nhis[i].d.doorbell && (watch_nhis[i].d.doorbell & ~0x3fffUL) == page)
             n = &watch_nhis[i];
 
-    bool doorbell = n && ipa == n->d.doorbell && write && width == 2;
+    /*
+     * The doorbell word (+8): cons in bits 15:0 (RX), prod in bits 31:16 (TX). Linux
+     * writes it 32-bit; taken also: RX 16-bit at +8, TX 16-bit at +10, 64-bit at +8
+     * (the size word above it rides along). Any other write into the word is counted
+     * as skipped, so a guest writing it some other way shows up instead of going quiet.
+     */
+    bool doorbell = false;
+    u32 idx = 0;
+    if (n && write && ipa >= n->d.doorbell && ipa < n->d.doorbell + 4) {
+        u64 off = ipa - n->d.doorbell;
+        if (off == 0 && (width == 2 || width == 3 || (width == 1 && n->d.rx))) {
+            doorbell = true;
+            idx = n->d.rx ? (*val & 0xffff) : ((*val >> 16) & 0xffff);
+        } else if (off == 2 && width == 1 && !n->d.rx) {
+            doorbell = true;
+            idx = *val & 0xffff;
+        } else {
+            n->skipped++;
+            watch_nhi_stat(n);
+        }
+    }
     if (n && !doorbell) {
         // not the doorbell: count, and log the count when it crosses a power of two
         u32 c = ++n->other;
         if (!(c & (c - 1)) || !(c & 0xfff))
-            watch_emit(WATCH_REC_NHI_STAT, n->d.id, c, n->doorbells, NULL, 0);
+            watch_nhi_stat(n);
     }
     if (doorbell && watch_nhi_on[n - watch_nhis]) {
         n->doorbells++;
         // ring size (+12, the next word): the NHI is up, the guest is writing to it
-        u32 size = read32(ipa + 4) & 0xffff;
-        u32 idx = n->d.rx ? (*val & 0xffff) : ((*val >> 16) & 0xffff);
+        u32 size = read32(n->d.doorbell + 4) & 0xffff;
         if (size && size <= n->d.ndesc && idx < size) {
             // only the index bookkeeping under the lock; frames are read outside it
             spin_lock(&watch_lock);
             u32 from = n->have_last ? n->last : (idx + size - 1) % size;
+            if (!n->have_last) {
+                // where the guest stood before is unknown: a first batch shows its last only
+                n->first_assumed = 1;
+                watch_nhi_stat(n);
+            }
             n->last = idx;
             n->have_last = true;
             spin_unlock(&watch_lock);
@@ -708,6 +741,8 @@ int hv_watch_nhi(u32 id, u64 desc)
     n->have_last = false;
     n->doorbells = 0;
     n->other = 0;
+    n->skipped = 0;
+    n->first_assumed = 0;
     n->fresh = true;
     if (d.doorbell) {
         u64 end = (d.doorbell | 0x3fffUL) + 1;
