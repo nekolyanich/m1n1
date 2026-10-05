@@ -41,7 +41,8 @@ def get_dcp_device(dev_type, dcp):
         raise KeyError(dev_type)
 
 dcp_name = os.environ.get("TRACE_DCP", "dcp0")
-dcp_watch = os.environ.get("TRACE_DCP_WATCH", "0") == "1"
+# 1: the watcher alone reads the rings; 2: the old synchronous read too, to compare
+dcp_watch = int(os.environ.get("TRACE_DCP_WATCH", "0"))
 
 trace_device(get_dcp_device(DCPDevType.DCP, dcp_name), True, ranges=[1])
 
@@ -108,7 +109,7 @@ class AFKEp(EP):
         ok = hv.watch_ring(self.epid << 1 | rx, self.dart, self.stream, buf.base,
                            buf.block_size, buf.bufsize, name=self.name)
         self.log(f"watch {'RX' if rx else 'TX'} ring {buf.base:#x}: {'on' if ok else 'FAILED'}")
-        buf.watched = ok
+        buf.watched = ok and dcp_watch == 1
 
     def add_mon(self):
         if self.state.shmem_iova:
