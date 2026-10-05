@@ -416,7 +416,7 @@ static bool hv_handle_msr(struct exc_info *ctx, u64 iss)
             if (!is_read && (regs[rt] & CYC_OVRD_DISABLE_WFI_RET) &&
                 !(regs[rt] & CYC_OVRD_FIQ_MODE_MASK) && hv_park_cpu())
                 return true;
-            return false;
+            break;
         case SYSREG_ISS(SYS_IMP_APL_IPI_RR_LOCAL_EL1): {
             assert(!is_read);
             u64 mpidr = (regs[rt] & 0xff) | (mrs(MPIDR_EL1) & 0xffff00);

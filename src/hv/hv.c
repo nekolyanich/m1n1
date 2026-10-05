@@ -449,6 +449,11 @@ void hv_wake_cpu(int cpu)
 void hv_wake_parked(void)
 {
     static u64 zero_regs[4];
+
+    /* on every exception exit: stay off the cache line unless a wake is queued */
+    if (!__atomic_load_n(&hv_cpu_wake_mask, __ATOMIC_RELAXED))
+        return;
+
     u64 mask = __atomic_exchange_n(&hv_cpu_wake_mask, 0, __ATOMIC_ACQ_REL);
 
     for (int cpu = 0; mask && cpu < MAX_CPUS; cpu++) {
