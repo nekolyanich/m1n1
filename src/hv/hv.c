@@ -46,6 +46,7 @@ static u64 hv_cpu_state_regs[MAX_CPUS];
  * taken out of the guest and re-entered at RVBAR when the guest wakes it.
  */
 static bool hv_cpu_parked[MAX_CPUS];
+static int hv_parked_ipis_logged[MAX_CPUS];
 static u64 hv_cpu_wake_mask;
 
 static bool hv_cpu_state_access(struct exc_info *ctx, u64 ipa, u64 *val, bool write, int width)
@@ -434,9 +435,19 @@ bool hv_park_cpu(void)
         return false;
 
     printf("HV: CPU %d powered down by the guest, parking\n", cpu);
+    hv_parked_ipis_logged[cpu] = 0;
     hv_cpu_parked[cpu] = true;
     hv_should_exit[cpu] = true;
     return true;
+}
+
+/* Every IPI the guest aims at a parked core, the first few per park: does it ever try? */
+void hv_log_parked_ipi(int cpu, u64 rr)
+{
+    if (cpu < 0 || cpu >= MAX_CPUS || !hv_cpu_parked[cpu])
+        return;
+    if (hv_parked_ipis_logged[cpu]++ < 16)
+        printf("HV: IPI_RR %#lx from CPU %d to parked CPU %d\n", rr, smp_id(), cpu);
 }
 
 void hv_wake_cpu(int cpu)

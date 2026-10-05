@@ -138,6 +138,7 @@ void hv_start_secondary(int cpu, void *entry, u64 regs[4]);
 void hv_exit_cpu(int cpu);
 bool hv_park_cpu(void);
 void hv_wake_cpu(int cpu);
+void hv_log_parked_ipi(int cpu, u64 rr);
 void hv_wake_parked(void);
 void hv_rendezvous(void);
 bool hv_switch_cpu(int cpu);

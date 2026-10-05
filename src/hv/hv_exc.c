@@ -430,6 +430,7 @@ static bool hv_handle_msr(struct exc_info *ctx, u64 iss)
                 if (mpidr == smp_get_mpidr(i)) {
                     pcpu[i].ipi_queued = true;
                     msr(SYS_IMP_APL_IPI_RR_LOCAL_EL1, regs[rt]);
+                    hv_log_parked_ipi(i, regs[rt]);
                     if (IPI_RR_WAKES(regs[rt]))
                         hv_wake_cpu(i);
                     return true;
@@ -443,6 +444,7 @@ static bool hv_handle_msr(struct exc_info *ctx, u64 iss)
                 if (mpidr == (smp_get_mpidr(i) & 0xffff)) {
                     pcpu[i].ipi_queued = true;
                     msr(SYS_IMP_APL_IPI_RR_GLOBAL_EL1, regs[rt]);
+                    hv_log_parked_ipi(i, regs[rt]);
                     if (IPI_RR_WAKES(regs[rt]))
                         hv_wake_cpu(i);
                     return true;
