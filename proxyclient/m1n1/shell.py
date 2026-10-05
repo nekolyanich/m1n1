@@ -2,7 +2,7 @@
 import atexit, serial, os, struct, code, traceback, readline, rlcompleter, sys
 import __main__
 import builtins
-import re
+import re, threading
 
 from .proxy import *
 from .proxyutils import *
@@ -19,6 +19,28 @@ class HistoryConsole(code.InteractiveConsole):
         self.histfile = histfile
         self.init_history(histfile)
         self.poll_func = None
+        self.keepalive = None
+        self._io = threading.Lock()
+        self._io.acquire()
+
+    def raw_input(self, prompt=""):
+        # While the prompt waits, a keepalive thread may use the proxy (see run_shell)
+        self._io.release()
+        try:
+            return super().raw_input(prompt)
+        finally:
+            self._io.acquire()
+
+    def keepalive_loop(self, stop, interval=30):
+        while not stop.wait(interval):
+            with self._io:
+                if stop.is_set():
+                    return
+                try:
+                    self.keepalive()
+                except Exception as e:
+                    print(f"shell keepalive failed: {e!r}")
+                    return
 
     def init_history(self, histfile):
         readline.parse_and_bind("tab: complete")
@@ -129,7 +151,7 @@ def help_cmd(arg=None):
 #locals is a dictionary for constructing the
 # InteractiveConsole with. It adds in the callables
 # in proxy utils iface and sysreg into locals
-def run_shell(locals, msg=None, exitmsg=None, poll_func=None):
+def run_shell(locals, msg=None, exitmsg=None, poll_func=None, keepalive=None):
     saved_display = sys.displayhook
     try:
         def display(val):
@@ -204,6 +226,12 @@ def run_shell(locals, msg=None, exitmsg=None, poll_func=None):
 
         con = HistoryConsole(locals)
         con.poll_func = poll_func
+        # keepalive() runs every 30 s while the prompt is idle: the HV's dead hand
+        # watchdog needs a proxy request now and then to tell an idle shell from a wedge
+        stop = threading.Event()
+        if keepalive:
+            con.keepalive = keepalive
+            threading.Thread(target=con.keepalive_loop, args=(stop,), daemon=True).start()
         try:
             con.interact(msg, exitmsg)
         except ExitConsole as e:
@@ -212,6 +240,8 @@ def run_shell(locals, msg=None, exitmsg=None, poll_func=None):
             else:
                 return
         finally:
+            stop.set()
+            con._io.release()
             con.save_history()
 
     finally:

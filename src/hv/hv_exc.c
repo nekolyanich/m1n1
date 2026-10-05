@@ -74,10 +74,9 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
     };
 
     hv_wdt_suspend();
-    // With every CPU held in the HV, the guest's SoC watchdogs must not see the stop either;
-    // they stay disarmed if the guest exits
-    if (time_stealing)
-        wdt_freeze();
+    // The guest's SoC watchdogs must not see the stop either; a dead hand stands in for
+    // them while in the proxy, and they stay disarmed if the guest exits
+    wdt_freeze();
     int ret = uartproxy_run(&start);
     hv_wdt_resume();
 
@@ -87,10 +86,11 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
             if (time_stealing) {
                 u64 lost = mrs(CNTPCT_EL0) - entry_time;
                 stolen_time += lost;
-                wdt_thaw();
             }
+            wdt_thaw();
             break;
         case EXC_EXIT_GUEST:
+            wdt_drop();
             hv_rendezvous();
             spin_unlock(&bhl);
             hv_exit_guest(); // does not return

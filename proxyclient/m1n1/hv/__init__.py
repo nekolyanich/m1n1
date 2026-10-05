@@ -420,7 +420,8 @@ class HV(Reloadable):
                 try:
                     if not self._gdbserver is None:
                         self._gdbserver.notify_in_shell()
-                    return shell.run_shell(self.shell_locals, entry_msg, exit_msg)
+                    return shell.run_shell(self.shell_locals, entry_msg, exit_msg,
+                                           keepalive=self.p.nop)
                 finally:
                     self._in_shell = False
             finally:

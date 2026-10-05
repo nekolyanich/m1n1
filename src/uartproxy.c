@@ -8,6 +8,7 @@
 #include "string.h"
 #include "types.h"
 #include "utils.h"
+#include "wdt.h"
 
 #define REQ_SIZE 64
 
@@ -199,6 +200,8 @@ int uartproxy_run(struct uartproxy_msg_start *start)
         reply.status = ST_OK;
 
         uartproxy_iodev = iodev;
+        // a request is proof of life for the dead hand an HV stop arms
+        wdt_pet();
 
         switch (request.type) {
             case REQ_NOP:

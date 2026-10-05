@@ -6,6 +6,7 @@
 #include "string.h"
 #include "uart.h"
 #include "utils.h"
+#include "wdt.h"
 
 #define WDT_TIMEOUT 1
 
@@ -69,6 +70,9 @@ void hv_wdt_bark(void)
     }
 
     uart_puts("Attempting to enter proxy");
+
+    // A panic shell that wedges too still resets the machine
+    wdt_freeze();
 
     struct uartproxy_msg_start start = {
         .reason = START_HV,

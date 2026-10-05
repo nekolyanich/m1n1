@@ -7,5 +7,7 @@ void wdt_disable(void);
 void wdt_reboot(void);
 void wdt_freeze(void);
 void wdt_thaw(void);
+void wdt_pet(void);
+void wdt_drop(void);
 
 #endif
