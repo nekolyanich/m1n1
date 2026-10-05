@@ -25,7 +25,23 @@
 #define MAX_ENDPOINTS   16
 #define CDC_BUFFER_SIZE SZ_1M
 
+/*
+ * Off unless USB_DWC3_DEBUG: these print from inside the event walk, and a print goes to
+ * the USB console. With a CPU in usb_dwc3_queue() holding the console's iodev lock and
+ * waiting for events to drain its ring, the CPU walking the events then blocks on that
+ * lock: the link wedges (a guest console write after an idle spell, when the link wakes
+ * with a device event, did it).
+ */
+#ifdef USB_DWC3_DEBUG
 #define usb_debug_printf(fmt, ...) debug_printf("usb-dwc3@%lx: " fmt, dev->regs, ##__VA_ARGS__)
+#else
+// still type-checked and keeping its arguments used, never called
+#define usb_debug_printf(fmt, ...)                                                                 \
+    do {                                                                                           \
+        if (0)                                                                                     \
+            debug_printf("usb-dwc3@%lx: " fmt, dev->regs, ##__VA_ARGS__);                          \
+    } while (0)
+#endif
 
 #define STRING_DESCRIPTOR_LANGUAGES    0
 #define STRING_DESCRIPTOR_MANUFACTURER 1
