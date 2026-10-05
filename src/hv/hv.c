@@ -40,6 +40,14 @@ u64 hv_saved_sp[MAX_CPUS];
 
 static u64 hv_cpu_state_regs[MAX_CPUS];
 
+/*
+ * macOS 15 powers idle cores down (CYC_OVRD DISABLE_WFI_RET + WFI) and expects
+ * them to come back through RVBAR on the next IPI or CPUSTART. A parked core is
+ * taken out of the guest and re-entered at RVBAR when the guest wakes it.
+ */
+static bool hv_cpu_parked[MAX_CPUS];
+static u64 hv_cpu_wake_mask;
+
 static bool hv_cpu_state_access(struct exc_info *ctx, u64 ipa, u64 *val, bool write, int width)
 {
     if (width != 2 && width != 3)
@@ -361,6 +369,14 @@ static void hv_init_secondary(struct hv_secondary_info_t *info)
 
 static void hv_enter_secondary(void *entry, u64 regs[4])
 {
+    if (hv_cpu_parked[smp_id()]) {
+        /* coming back from a guest power-down: the guest expects reset state */
+        hv_cpu_parked[smp_id()] = false;
+        msr(SYS_SCTLR_EL12, SCTLR_LSMAOE | SCTLR_nTLSMD | SCTLR_SPAN | SCTLR_EIS | SCTLR_TSCXT |
+                                BIT(11) /* EOS */);
+        sysop("isb");
+    }
+
     hv_enter_guest(regs[0], regs[1], regs[2], regs[3], entry);
 
     spin_lock(&bhl);
@@ -375,13 +391,18 @@ static void hv_enter_secondary(void *entry, u64 regs[4])
 
 void hv_start_secondary(int cpu, void *entry, u64 regs[4])
 {
-    printf("HV: Initializing secondary %d\n", cpu);
+    /* CPUSTART for a parked core: drop a wake the IPI path may have queued */
+    __atomic_and_fetch(&hv_cpu_wake_mask, ~BIT(cpu), __ATOMIC_ACQ_REL);
+    hv_should_exit[cpu] = false;
+
+    printf("HV: Initializing secondary %d%s\n", cpu, hv_cpu_parked[cpu] ? " (parked)" : "");
     iodev_console_flush();
 
     if (hv_sptm_mode == SPTM_EMULATION)
         hv_sprr_init_secondary(cpu);
 
-    mmu_init_secondary(cpu);
+    if (!hv_cpu_parked[cpu])
+        mmu_init_secondary(cpu);
     iodev_console_flush();
     smp_call4(cpu, hv_init_secondary, (u64)&hv_secondary_info, 0, 0, 0);
     smp_wait(cpu);
@@ -402,6 +423,53 @@ void hv_exit_cpu(int cpu)
 
     printf("HV: Requesting exit of CPU#%d from the guest\n", cpu);
     hv_should_exit[cpu] = true;
+}
+
+bool hv_park_cpu(void)
+{
+    int cpu = smp_id();
+
+    /* RVBAR is only readable with the Apple sysregs unlocked; never park the boot CPU */
+    if (cpu == boot_cpu_idx || !cpu_features->apple_sysregs_unlocked || !hv_cpu_state_regs[cpu])
+        return false;
+
+    printf("HV: CPU %d powered down by the guest, parking\n", cpu);
+    hv_cpu_parked[cpu] = true;
+    hv_should_exit[cpu] = true;
+    return true;
+}
+
+void hv_wake_cpu(int cpu)
+{
+    if (cpu >= 0 && cpu < MAX_CPUS && hv_cpu_parked[cpu])
+        __atomic_or_fetch(&hv_cpu_wake_mask, BIT(cpu), __ATOMIC_ACQ_REL);
+}
+
+/* Called with bhl released: a core still on its way out takes bhl to finish */
+void hv_wake_parked(void)
+{
+    static u64 zero_regs[4];
+    u64 mask = __atomic_exchange_n(&hv_cpu_wake_mask, 0, __ATOMIC_ACQ_REL);
+
+    for (int cpu = 0; mask && cpu < MAX_CPUS; cpu++) {
+        if (!(mask & BIT(cpu)))
+            continue;
+        mask &= ~BIT(cpu);
+
+        smp_wait(cpu);
+        if (!hv_cpu_parked[cpu] || hv_started_cpus[cpu])
+            continue;
+
+        void *entry = (void *)(read64(hv_cpu_state_regs[cpu] - 0x100) & 0xfffffffffffUL);
+        printf("HV: waking parked CPU %d at %p\n", cpu, entry);
+
+        hv_should_exit[cpu] = false;
+        smp_call4(cpu, hv_init_secondary, (u64)&hv_secondary_info, 0, 0, 0);
+        smp_wait(cpu);
+        hv_started_cpus[cpu] = true;
+        __atomic_or_fetch(&hv_cpus_in_guest, BIT(cpu), __ATOMIC_ACQUIRE);
+        smp_call4(cpu, hv_enter_secondary, (u64)entry, (u64)zero_regs, 0, 0);
+    }
 }
 
 void hv_rendezvous(void)

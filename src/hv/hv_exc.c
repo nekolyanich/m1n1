@@ -18,6 +18,10 @@ extern spinlock_t bhl;
 
 #define PERCPU(x) pcpu[mrs(TPIDR_EL2)].x
 
+/* IPI_RR type field: 0 immediate, 1 retract, 2 deferred, 3 no-wake */
+#define IPI_RR_TYPE        GENMASK(29, 28)
+#define IPI_RR_WAKES(v)    (FIELD_GET(IPI_RR_TYPE, v) == 0 || FIELD_GET(IPI_RR_TYPE, v) == 2)
+
 struct hv_pcpu_data {
     u32 ipi_queued;
     u32 ipi_pending;
@@ -407,6 +411,12 @@ static bool hv_handle_msr(struct exc_info *ctx, u64 iss)
 
     switch (reg) {
         /* clang-format on */
+        /* the unlocked path refused this: a guest core power-down (macOS 15 parking) */
+        case SYSREG_ISS(SYS_IMP_APL_CYC_OVRD):
+            if (!is_read && (regs[rt] & CYC_OVRD_DISABLE_WFI_RET) &&
+                !(regs[rt] & CYC_OVRD_FIQ_MODE_MASK) && hv_park_cpu())
+                return true;
+            return false;
         case SYSREG_ISS(SYS_IMP_APL_IPI_RR_LOCAL_EL1): {
             assert(!is_read);
             u64 mpidr = (regs[rt] & 0xff) | (mrs(MPIDR_EL1) & 0xffff00);
@@ -414,6 +424,8 @@ static bool hv_handle_msr(struct exc_info *ctx, u64 iss)
                 if (mpidr == smp_get_mpidr(i)) {
                     pcpu[i].ipi_queued = true;
                     msr(SYS_IMP_APL_IPI_RR_LOCAL_EL1, regs[rt]);
+                    if (IPI_RR_WAKES(regs[rt]))
+                        hv_wake_cpu(i);
                     return true;
                 }
             return false;
@@ -425,6 +437,8 @@ static bool hv_handle_msr(struct exc_info *ctx, u64 iss)
                 if (mpidr == (smp_get_mpidr(i) & 0xffff)) {
                     pcpu[i].ipi_queued = true;
                     msr(SYS_IMP_APL_IPI_RR_GLOBAL_EL1, regs[rt]);
+                    if (IPI_RR_WAKES(regs[rt]))
+                        hv_wake_cpu(i);
                     return true;
                 }
             }
@@ -486,6 +500,7 @@ static void hv_exc_exit(struct exc_info *ctx)
     reg_set(SYS_IMP_APL_PMCR0, PERCPU(exc_entry_pmcr0_cnt));
     msr(CNTVOFF_EL2, stolen_time);
     spin_unlock(&bhl);
+    hv_wake_parked();
     hv_maybe_exit();
     __atomic_or_fetch(&hv_cpus_in_guest, BIT(smp_id()), __ATOMIC_ACQUIRE);
 
