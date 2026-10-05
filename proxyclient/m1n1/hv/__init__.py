@@ -1757,7 +1757,9 @@ class HV(Reloadable):
             wdt = self.adt["/arm-io/wdt"]
             if getattr(wdt, "wdt_version", None) in (2, 3) and len(wdt.reg) > 2:
                 self.smcwd_addr = wdt.get_reg(2)[0]
-                self.add_tracer(irange(self.smcwd_addr, 8), "SMC WDT DEADLINE", TraceMode.RESERVED)
+                # the hook covers the aligned 8 bytes around the word
+                self.add_tracer(irange(self.smcwd_addr & ~7, 8), "SMC WDT DEADLINE",
+                                TraceMode.RESERVED)
 
         def cpustart_wh(base, off, data, width):
             self.log(f"CPUSTART W {base:x}+{off:x}:{width} = 0x{data:x}")
@@ -2441,6 +2443,10 @@ class HV(Reloadable):
             ret = self.p.hv_smcwd_hook(self.smcwd_addr)
             print(f"HV: SMC watchdog deadline @{self.smcwd_addr:#x} "
                   f"{'follows the stolen time' if ret == 0 else f'NOT hooked ({ret:#x})'}")
+            if ret != 0:
+                # a reserved range nobody hooked is a hole in the guest's map: give it back
+                self.del_tracer(irange(self.smcwd_addr & ~7, 8), "SMC WDT DEADLINE")
+                self.pt_update()
         if self.watch_cpu is not None and self.watch_cpu == self.wdt_cpu:
             print(f"HV watch: CPU {self.watch_cpu} already runs the HV watchdog, no watcher")
         elif self.watch_cpu is not None:

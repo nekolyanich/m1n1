@@ -49,13 +49,14 @@ static bool smcwd_access(struct exc_info *ctx, u64 ipa, u64 *val, bool write, in
 
 int hv_smcwd_hook(u64 addr)
 {
-    // only the word m1n1 itself knows as the secondary WDT, 8-byte aligned for the hook
-    if (!addr || addr != wdt_secondary_addr() || (addr & 7))
+    // only the word m1n1 itself knows as the secondary WDT (t6020: 0x29e2a002c, so
+    // not 8-byte aligned: the hook covers the aligned 8 bytes around it)
+    if (!addr || addr != wdt_secondary_addr() || (addr & 3))
         return -1;
 
     smcwd_reg = addr;
     smcwd_guest = read32(addr);
-    if (hv_map_hook(addr, smcwd_access, 8) < 0) {
+    if (hv_map_hook(addr & ~7UL, smcwd_access, 8) < 0) {
         smcwd_reg = 0;
         return -2;
     }
