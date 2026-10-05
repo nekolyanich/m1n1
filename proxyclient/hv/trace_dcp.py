@@ -1025,8 +1025,25 @@ class DPSACService(EPICEp):
     NAME = "dpsac"
 
 
+_ake_break_done = False
+
 class DCPDPDeviceEpicTracer(EPICServiceTracer):
     NAME = "dcpdp-device-epic"
+
+    # (1,7) is a DPCD write, its address at +0x10. TRACE_DCP_BREAK_AKE=1 freezes the
+    # guest in the HV shell at the first HDCP AKE_Init (0x69000), so the display can be
+    # checked before any HDCP 2.x message reaches the sink.
+    @epic_service_cmd(1, 7)
+    def dpcdWrite(self, data):
+        global _ake_break_done
+        addr = struct.unpack_from("<I", data, 0x10)[0] if len(data) >= 0x14 else None
+        self.log(f"> dpcdWrite addr={addr:#x}" if addr is not None else "> dpcdWrite")
+        chexdump(data, print_fn=self.log)
+        if (os.environ.get("TRACE_DCP_BREAK_AKE") == "1" and addr == 0x69000
+                and not _ake_break_done):
+            _ake_break_done = True
+            hv.run_shell("AKE_Init (DPCD 0x69000): guest frozen, check the display",
+                         "Continuing the guest")
 
     @epic_service_cmd(0, 15)
     def getDeviceMatchingData(self, data):
