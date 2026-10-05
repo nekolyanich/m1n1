@@ -648,8 +648,11 @@ static bool watch_nhi_doorbell(struct exc_info *ctx, u64 ipa, u64 *val, bool wri
 {
     struct watch_nhi *n = NULL;
     u64 page = ipa & ~0x3fffUL;
+    // only a live ring: a stopped one keeps its doorbell in a slot that a restart of the
+    // same ring may not reuse, and picking that one dropped every frame after a replug
     for (int i = 0; i < WATCH_MAX_NHI; i++)
-        if (watch_nhis[i].d.doorbell && (watch_nhis[i].d.doorbell & ~0x3fffUL) == page)
+        if (watch_nhi_on[i] && watch_nhis[i].d.doorbell &&
+            (watch_nhis[i].d.doorbell & ~0x3fffUL) == page)
             n = &watch_nhis[i];
 
     /*
@@ -710,13 +713,28 @@ int hv_watch_nhi(u32 id, u64 desc)
         return -1;
 
     int slot = -1;
+    bool rearm = false;
     for (int i = 0; i < WATCH_MAX_NHI; i++) {
         if (watch_nhi_on[i] && watch_nhis[i].d.id == id) {
+            // the final counts of the ring as it was, exact, not just their last power of 2
+            watch_nhi_stat(&watch_nhis[i]);
             watch_nhi_on[i] = false;
             slot = i;
         }
     }
     watch_sync();
+    // a stopped earlier run of this ring, in whatever slot: forget it, a restart is new
+    for (int i = 0; i < WATCH_MAX_NHI; i++) {
+        if (!watch_nhi_on[i] && watch_nhis[i].d.ndesc && watch_nhis[i].d.id == id) {
+            rearm = true;
+            if (slot < 0)
+                slot = i;
+            if (i != slot)
+                watch_nhis[i].d.doorbell = 0;
+        }
+    }
+    if (slot >= 0)
+        rearm = true;
     if (!desc)
         return 0;
 
@@ -766,6 +784,9 @@ int hv_watch_nhi(u32 id, u64 desc)
     sysop("dsb ish");
     watch_nhi_on[slot] = true;
     sysop("dsb ish");
+    // a doorbell ring is never polled, so its arming is logged here: b = 1 for a re-arm
+    if (d.doorbell)
+        watch_emit(WATCH_REC_NHI_ARM, id, d.ndesc, rearm, NULL, 0);
     return 0;
 }
 
