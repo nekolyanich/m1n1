@@ -73,6 +73,7 @@ struct watch_nhi {
     struct hv_watch_nhi_desc d;
     bool fresh;
     u32 nbufs;
+    u32 evict; // the next buffer to give up once all are taken
     struct watch_nhi_buf bufs[WATCH_NHI_BUFS];
     u8 shadow[WATCH_NHI_MAX_DESC * 16];
 };
@@ -394,8 +395,13 @@ static void watch_nhi_track(struct watch_nhi *n, u64 pa, u32 len, u32 slot, cons
         if (n->bufs[b].pa == pa)
             buf = &n->bufs[b];
     if (!buf) {
-        // full: the oldest entry goes, round robin by the next free index
-        buf = &n->bufs[n->nbufs < WATCH_NHI_BUFS ? n->nbufs++ : slot % WATCH_NHI_BUFS];
+        // full: the entry added first goes (FIFO, not LRU: a handful of buffers)
+        if (n->nbufs < WATCH_NHI_BUFS) {
+            buf = &n->bufs[n->nbufs++];
+        } else {
+            buf = &n->bufs[n->evict];
+            n->evict = (n->evict + 1) % WATCH_NHI_BUFS;
+        }
         buf->pa = pa;
     }
     buf->len = len;
@@ -607,6 +613,7 @@ int hv_watch_nhi(u32 id, u64 desc)
     n->d = d;
     n->d.id = id;
     n->nbufs = 0;
+    n->evict = 0;
     n->fresh = true;
     sysop("dsb ish");
     watch_nhi_on[slot] = true;
