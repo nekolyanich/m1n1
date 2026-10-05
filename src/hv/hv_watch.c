@@ -27,7 +27,40 @@ enum {
     WATCH_REC_WPTR = 2,  // producer moved: a = old wptr, b = new wptr, data = [old, new)
     WATCH_REC_RPTR = 3,  // consumer moved: a = old rptr, b = new rptr
     WATCH_REC_BAD = 4,   // ring header no longer makes sense, ring dropped: a = rptr, b = wptr
+    WATCH_REC_MMIO = 5,  // probe word changed: a = byte offset, b = new value
+    WATCH_REC_GATE = 6,  // probe power changed: a = 1 on / 0 off, b = the PS value that decided
 };
+
+/*
+ * MMIO probes: a few 32-bit registers read every period_us, logged only when they
+ * change. A read of a block that is powered off can hang the bus, so a probe has
+ * PMGR PS registers as gates and is read only while all of them say "on" (actual
+ * state, bits 7:4 == 0xf); the gates are re-read right before every word.
+ */
+#define WATCH_MAX_PROBES 16
+#define WATCH_PROBE_WORDS 16
+#define WATCH_MAX_GATES 4
+
+struct hv_watch_probe_desc {
+    u32 id;
+    u32 nwords;
+    u32 period_us;
+    u32 ngates;
+    u64 addr;
+    u64 gates[WATCH_MAX_GATES];
+};
+
+struct watch_probe {
+    struct hv_watch_probe_desc d;
+    u64 period;
+    u64 next;
+    bool on;
+    bool valid;
+    u32 vals[WATCH_PROBE_WORDS];
+};
+
+static struct watch_probe watch_probes[WATCH_MAX_PROBES];
+static volatile bool watch_probe_on[WATCH_MAX_PROBES];
 
 struct watch_seg {
     u64 pa;
@@ -205,12 +238,55 @@ static void watch_poll(int i)
     }
 }
 
+/* All gates on? *ps gets the first PS value that is not, or the last one read */
+static bool watch_gates_on(struct watch_probe *p, u32 *ps)
+{
+    for (u32 i = 0; i < p->d.ngates; i++) {
+        *ps = read32(p->d.gates[i]);
+        if (((*ps >> 4) & 0xf) != 0xf)
+            return false;
+    }
+    return true;
+}
+
+static void watch_probe_poll(int i, u64 now)
+{
+    struct watch_probe *p = &watch_probes[i];
+    u32 ps = 0;
+
+    if (now < p->next)
+        return;
+    p->next = now + p->period;
+
+    for (u32 w = 0; w < p->d.nwords; w++) {
+        bool on = watch_gates_on(p, &ps);
+        if (on != p->on) {
+            watch_emit(WATCH_REC_GATE, p->d.id, on, ps, NULL, 0);
+            p->on = on;
+        }
+        if (!on) {
+            // values seen after power comes back are all news
+            p->valid = false;
+            return;
+        }
+        u32 v = read32(p->d.addr + 4 * w);
+        if (!p->valid || v != p->vals[w])
+            watch_emit(WATCH_REC_MMIO, p->d.id, 4 * w, v, NULL, 0);
+        p->vals[w] = v;
+    }
+    p->valid = true;
+}
+
 static void hv_watch_main(void)
 {
     while (hv_watch_active) {
         for (int i = 0; i < WATCH_MAX_RINGS; i++)
             if (watch_ring_on[i])
                 watch_poll(i);
+        u64 now = mrs(CNTPCT_EL0);
+        for (int i = 0; i < WATCH_MAX_PROBES; i++)
+            if (watch_probe_on[i])
+                watch_probe_poll(i, now);
         watch_log->polls++;
         sysop("dmb ish");
     }
@@ -232,6 +308,8 @@ int hv_watch_start(int cpu, u64 log, u64 size)
     watch_log->cntfrq = mrs(CNTFRQ_EL0);
     for (int i = 0; i < WATCH_MAX_RINGS; i++)
         watch_ring_on[i] = false;
+    for (int i = 0; i < WATCH_MAX_PROBES; i++)
+        watch_probe_on[i] = false;
     sysop("dsb ish");
 
     hv_watch_cpu = cpu;
@@ -295,6 +373,56 @@ int hv_watch_add(u32 id, u64 desc)
     r->fresh = true;
     sysop("dsb ish");
     watch_ring_on[slot] = true;
+    sysop("dsb ish");
+    return 0;
+}
+
+/* Arm (or re-arm) the MMIO probe with the given id; desc == 0 drops it */
+int hv_watch_probe(u32 id, u64 desc)
+{
+    if (!hv_watch_active)
+        return -1;
+
+    int slot = -1;
+    for (int i = 0; i < WATCH_MAX_PROBES; i++) {
+        if (watch_probe_on[i] && watch_probes[i].d.id == id) {
+            watch_probe_on[i] = false;
+            slot = i;
+        }
+    }
+    watch_sync();
+    if (!desc)
+        return 0;
+
+    if (slot < 0)
+        for (int i = 0; i < WATCH_MAX_PROBES; i++)
+            if (!watch_probe_on[i]) {
+                slot = i;
+                break;
+            }
+    if (slot < 0)
+        return -2;
+
+    struct hv_watch_probe_desc d;
+    memcpy(&d, (void *)desc, sizeof(d));
+    // never ungated, never RAM (rings are for that), never more than a handful of words
+    if (d.ngates == 0 || d.ngates > WATCH_MAX_GATES || d.nwords == 0 ||
+        d.nwords > WATCH_PROBE_WORDS || d.period_us < 10 || (d.addr & 3) ||
+        watch_in_ram(d.addr, 4 * d.nwords))
+        return -3;
+    for (u32 i = 0; i < d.ngates; i++)
+        if ((d.gates[i] & 3) || watch_in_ram(d.gates[i], 4))
+            return -4;
+
+    struct watch_probe *p = &watch_probes[slot];
+    p->d = d;
+    p->d.id = id;
+    p->period = mrs(CNTFRQ_EL0) * d.period_us / 1000000;
+    p->next = 0;
+    p->on = false;
+    p->valid = false;
+    sysop("dsb ish");
+    watch_probe_on[slot] = true;
     sysop("dsb ish");
     return 0;
 }

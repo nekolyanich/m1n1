@@ -559,6 +559,9 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WATCH_STOP:
             hv_watch_stop();
             break;
+        case P_HV_WATCH_PROBE:
+            reply->retval = hv_watch_probe(request->args[0], request->args[1]);
+            break;
 
         case P_FB_INIT:
             fb_init(request->args[0]);

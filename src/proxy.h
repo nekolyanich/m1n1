@@ -151,6 +151,7 @@ typedef enum {
     P_HV_WATCH_START,
     P_HV_WATCH_ADD,
     P_HV_WATCH_STOP,
+    P_HV_WATCH_PROBE,
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

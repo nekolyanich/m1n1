@@ -114,6 +114,8 @@ class HV(Reloadable):
         self.watch_size = 32 << 20
         self.watch_log = None
         self.watch_rings = {}
+        self.watch_probes = {}
+        self._watch_pending = []
         self.smp = True
         self.hook_exceptions = False
         self.sptm_mode = SPTM_MODE.SPTM_NONE
@@ -330,6 +332,47 @@ class HV(Reloadable):
             return False
         self.watch_rings[id] = (name or f"ring{id:#x}", blk, bufsize)
         self.log(f"HV watch: ring {id:#x} {name} iova {iova:#x} blk {blk:#x} size {bufsize:#x} -> {segs}")
+        return True
+
+    def watch_mmio(self, id, addr, nwords, gates, period_us=100, name=None):
+        '''Have the watcher read nwords 32-bit registers at addr every period_us and log
+        changes, only while every PMGR device named in gates is on. Queued until the
+        watcher starts. hv.watch_probes keeps id -> (name, addr, nwords)'''
+        pmgr = self.adt[self.adt._pmgr_path]
+        devs = {d.name: d for d in pmgr.devices}
+        gate_addrs = []
+        for g in gates:
+            if g not in devs:
+                print(f"HV watch: probe {id:#x}: no PMGR device {g}, not armed")
+                return False
+            a = self.adt.pmgr_dev_get_addr(devs[g])
+            # the GPU's own PMGR belongs to its firmware: reading it took the machine down
+            if a >> 24 == 0x404:
+                print(f"HV watch: probe {id:#x}: {g} is in the GPU PMGR, not armed")
+                return False
+            gate_addrs.append(a)
+        if not gate_addrs or len(gate_addrs) > 4 or not 1 <= nwords <= 16:
+            print(f"HV watch: probe {id:#x}: needs 1-4 gates and 1-16 words")
+            return False
+        desc = struct.pack("<IIIIQ", id, nwords, period_us, len(gate_addrs), addr)
+        desc += b"".join(struct.pack("<Q", a) for a in gate_addrs)
+        desc += bytes(8 * (4 - len(gate_addrs)))
+        self.watch_probes[id] = (name or f"probe{id:#x}", addr, nwords)
+        if self.watch_log is None:
+            self._watch_pending.append((id, desc))
+            return True
+        return self._watch_probe_arm(id, desc)
+
+    def _watch_probe_arm(self, id, desc):
+        if getattr(self, "_watch_pdesc", None) is None:
+            self._watch_pdesc = self.u.heap.malloc(len(desc))
+        self.iface.writemem(self._watch_pdesc, desc)
+        ret = self.p.hv_watch_probe(id, self._watch_pdesc)
+        if ret != 0:
+            print(f"HV watch: probe {id:#x} refused ({ret - (1 << 64) if ret >> 63 else ret})")
+            return False
+        name, addr, nwords = self.watch_probes[id]
+        self.log(f"HV watch: probe {id:#x} {name} {addr:#x} x{nwords}")
         return True
 
     def pt_update(self):
@@ -2289,6 +2332,10 @@ class HV(Reloadable):
             if ret != 0:
                 print(f"HV watch: could not start on CPU {self.watch_cpu} ({ret:#x})")
                 self.watch_log = None
+            else:
+                for id, desc in self._watch_pending:
+                    self._watch_probe_arm(id, desc)
+        self._watch_pending = []
         # Does not return
 
         self.started = True
