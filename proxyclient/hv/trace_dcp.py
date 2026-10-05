@@ -133,6 +133,22 @@ class AFKEp(EP):
 
     Hello =         msg_log(0xa3, DIR.TX)
 
+    # macOS 15 firmware rings the AP->IOP doorbell with 0x85 as well (old ptr, new
+    # wptr, old ptr), never 0xa2: read the TX ring here or AP->DCP traffic is lost.
+    @msg(0x85, DIR.TX, AFKEPMessage)
+    def Send85(self, msg):
+        if self.txbuf is None:
+            self.log(f">TX msg:{msg} (no TX ring yet)")
+            return True
+        try:
+            return self.Send(msg)
+        except Exception as e:
+            # a ring we cannot follow must not stop the guest: resync to the wptr
+            self.log(f">TX ring lost ({type(e).__name__}: {e}), resync")
+            self.txbuf.rptr = self.txbuf.get_wptr()
+            self.txbuf.update_rptr(self.txbuf.rptr)
+            return True
+
     @msg(0x85, DIR.RX, AFKEPMessage)
     def Recv(self, msg):
         self.log(f"<RX msg:{msg}")
