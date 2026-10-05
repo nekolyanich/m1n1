@@ -9,6 +9,7 @@
  */
 
 #include "hv.h"
+#include "memory.h"
 #include "smp.h"
 #include "string.h"
 #include "utils.h"
@@ -48,13 +49,31 @@ struct hv_watch_nhi_desc {
     u32 id;
     u32 ndesc;
     u64 desc_pa;  // the descriptor array, 16 bytes each, physically contiguous
-    u64 l1[4];    // DART level-1 table per IOVA bits 37:36 (0: none)
+    u64 l1[4];    // two levels: DART level-1 table per IOVA bits 37:36 (0: none)
     u64 pte_mask; // PTE bits holding the page number (PA >> 14)
+    u64 l0;       // three levels (t8110 FOUR_LEVELS): the level-0 table, l1[] unused
+    u64 rx;       // an RX ring: the NHI rewrites a descriptor for every frame it fills
+};
+
+/*
+ * A TX ring's frames are followed by content as well: macOS sends every control
+ * packet from the same buffer, and packets of one length leave the descriptors
+ * unchanged. Up to WATCH_NHI_BUFS distinct buffers, each with the bytes last logged.
+ */
+#define WATCH_NHI_BUFS 8
+
+struct watch_nhi_buf {
+    u64 pa;
+    u32 len;
+    u32 slot; // the descriptor that last pointed here
+    u8 shadow[WATCH_NHI_FRAME];
 };
 
 struct watch_nhi {
     struct hv_watch_nhi_desc d;
     bool fresh;
+    u32 nbufs;
+    struct watch_nhi_buf bufs[WATCH_NHI_BUFS];
     u8 shadow[WATCH_NHI_MAX_DESC * 16];
 };
 
@@ -327,25 +346,61 @@ static u64 watch_pte_page(struct watch_nhi *n, u64 pte)
     return ((pte & mask) >> __builtin_ctzll(mask)) << 14;
 }
 
+/*
+ * What the device and the guest wrote, not a stale line of ours: the guest maps
+ * memory a non-coherent device uses uncached, while the watcher reads it cached.
+ * Clean+invalidate is harmless, the watcher never writes these lines.
+ */
+static void watch_fresh(u64 pa, u64 len)
+{
+    dc_civac_range((void *)pa, len);
+}
+
+/* One DART table entry, valid, 0 otherwise */
+static u64 watch_pte(u64 table, u64 index)
+{
+    u64 p = table + 8 * index;
+    if (!watch_in_ram(p, 8))
+        return 0;
+    watch_fresh(p, 8);
+    u64 pte = read64(p);
+    return (pte & 1) ? pte : 0;
+}
+
 /* IOVA -> PA through the DART tables in RAM, 0 if not mapped */
 static u64 watch_iova2pa(struct watch_nhi *n, u64 iova)
 {
-    u64 l1 = n->d.l1[(iova >> 36) & 3];
-    if (!l1)
+    u64 l1, pte;
+
+    if (n->d.l0) {
+        if (!(pte = watch_pte(n->d.l0, (iova >> 36) & 0x7ff)))
+            return 0;
+        l1 = watch_pte_page(n, pte);
+    } else {
+        l1 = n->d.l1[(iova >> 36) & 3];
+    }
+    if (!l1 || !(pte = watch_pte(l1, (iova >> 25) & 0x7ff)))
         return 0;
-    u64 p = l1 + 8 * ((iova >> 25) & 0x7ff);
-    if (!watch_in_ram(p, 8))
-        return 0;
-    u64 pte = read64(p);
-    if (!(pte & 1))
-        return 0;
-    p = watch_pte_page(n, pte) + 8 * ((iova >> 14) & 0x7ff);
-    if (!watch_in_ram(p, 8))
-        return 0;
-    pte = read64(p);
-    if (!(pte & 1))
+    if (!(pte = watch_pte(watch_pte_page(n, pte), (iova >> 14) & 0x7ff)))
         return 0;
     return watch_pte_page(n, pte) | (iova & 0x3fff);
+}
+
+/* Remember the bytes just logged for a TX buffer, so a change of them is news */
+static void watch_nhi_track(struct watch_nhi *n, u64 pa, u32 len, u32 slot, const u8 *bytes)
+{
+    struct watch_nhi_buf *buf = NULL;
+    for (u32 b = 0; b < n->nbufs; b++)
+        if (n->bufs[b].pa == pa)
+            buf = &n->bufs[b];
+    if (!buf) {
+        // full: the oldest entry goes, round robin by the next free index
+        buf = &n->bufs[n->nbufs < WATCH_NHI_BUFS ? n->nbufs++ : slot % WATCH_NHI_BUFS];
+        buf->pa = pa;
+    }
+    buf->len = len;
+    buf->slot = slot;
+    memcpy(buf->shadow, bytes, len);
 }
 
 static void watch_nhi_poll(int i)
@@ -353,6 +408,7 @@ static void watch_nhi_poll(int i)
     struct watch_nhi *n = &watch_nhis[i];
     u8 desc[16];
 
+    watch_fresh(n->d.desc_pa, 16 * n->d.ndesc);
     if (n->fresh) {
         memcpy(n->shadow, (void *)n->d.desc_pa, 16 * n->d.ndesc);
         watch_emit(WATCH_REC_NHI_ARM, n->d.id, n->d.ndesc, 0, NULL, 0);
@@ -380,9 +436,25 @@ static void watch_nhi_poll(int i)
             len = 0;
 
         memcpy(watch_nhi_rec, desc, 16);
-        if (len)
+        if (len) {
+            watch_fresh(pa, len);
             memcpy(watch_nhi_rec + 16, (void *)pa, len);
+            if (!n->d.rx)
+                watch_nhi_track(n, pa, len, k, watch_nhi_rec + 16);
+        }
         watch_emit(WATCH_REC_NHI, n->d.id, k, pa, watch_nhi_rec, 16 + len);
+    }
+
+    // TX buffers whose bytes changed under an unchanged descriptor: a new packet
+    for (u32 b = 0; !n->d.rx && b < n->nbufs; b++) {
+        struct watch_nhi_buf *buf = &n->bufs[b];
+        watch_fresh(buf->pa, buf->len);
+        if (!memcmp(buf->shadow, (void *)buf->pa, buf->len))
+            continue;
+        memcpy(buf->shadow, (void *)buf->pa, buf->len);
+        memcpy(watch_nhi_rec, n->shadow + 16 * buf->slot, 16);
+        memcpy(watch_nhi_rec + 16, buf->shadow, buf->len);
+        watch_emit(WATCH_REC_NHI, n->d.id, buf->slot, buf->pa, watch_nhi_rec, 16 + buf->len);
     }
 }
 
@@ -528,10 +600,13 @@ int hv_watch_nhi(u32 id, u64 desc)
     for (int i = 0; i < 4; i++)
         if (d.l1[i] && !watch_in_ram(d.l1[i], 0x4000))
             return -4;
+    if (d.l0 && !watch_in_ram(d.l0, 0x4000))
+        return -4;
 
     struct watch_nhi *n = &watch_nhis[slot];
     n->d = d;
     n->d.id = id;
+    n->nbufs = 0;
     n->fresh = true;
     sysop("dsb ish");
     watch_nhi_on[slot] = true;

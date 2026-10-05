@@ -445,12 +445,11 @@ class HV(Reloadable):
                 print(f"HV watch: NHI ring {id:#x}: TTBR of stream {stream} not valid")
                 return False
             if tcr.FOUR_LEVELS:
+                # IOVAs go past 2^38 here (0x100_0000_0000+): the watcher walks from L0
                 l0 = ttbr.ADDR << 14
-                l1s = []
-                for i in range(4):
-                    pte = PTE(self.p.read64(l0 + 8 * i))
-                    l1s.append(pte.OFFSET << 14 if pte.VALID else 0)
+                l1s = [0] * 4
             else:
+                l0 = 0
                 l1s = [ttbr.ADDR << 14] * 4
             pte_mask = field_mask(PTE)
         else:
@@ -459,10 +458,11 @@ class HV(Reloadable):
             if not ttbr.VALID:
                 print(f"HV watch: NHI ring {id:#x}: TTBR of stream {stream} not valid")
                 return False
+            l0 = 0
             l1s = [ttbr.ADDR << 12] * 4
             pte_mask = field_mask(d.ptecls)
 
-        desc = struct.pack("<IIQ4QQ", id, ndesc, desc_pa, *l1s, pte_mask)
+        desc = struct.pack("<IIQ4QQQQ", id, ndesc, desc_pa, *l1s, pte_mask, l0, int(bool(rx)))
         if getattr(self, "_watch_ndesc", None) is None:
             self._watch_ndesc = self.u.heap.malloc(len(desc))
         self.iface.writemem(self._watch_ndesc, desc)
@@ -473,7 +473,7 @@ class HV(Reloadable):
         self.watch_nhis[id] = (name or f"nhi{id:#x}", bool(rx))
         self._watch_meta_dirty = True
         self.log(f"HV watch: NHI ring {id:#x} {name} iova {desc_iova:#x} -> {desc_pa:#x} x{ndesc}, "
-                 f"l1 {[hex(a) for a in l1s]}, pte mask {pte_mask:#x}")
+                 f"l0 {l0:#x} l1 {[hex(a) for a in l1s]}, pte mask {pte_mask:#x}")
         return True
 
     WATCH_MAX_GATES = 6
