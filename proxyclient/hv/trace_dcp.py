@@ -43,6 +43,8 @@ def get_dcp_device(dev_type, dcp):
 dcp_name = os.environ.get("TRACE_DCP", "dcp0")
 # 1: the watcher alone reads the rings; 2: the old synchronous read too, to compare
 dcp_watch = int(os.environ.get("TRACE_DCP_WATCH", "0"))
+# a directory for the raw setDCPAVProp blobs (see DCPCallChannel.save_dcpav_prop)
+dcp_propdir = os.environ.get("TRACE_DCP_PROPDIR")
 
 trace_device(get_dcp_device(DCPDevType.DCP, dcp_name), True, ranges=[1])
 
@@ -867,8 +869,44 @@ class DCPCallChannel(Reloadable):
 
         c = Call(dir, self.name, msg.OFF, tag, in_len, out_len, data_in)
         c.print_req(logger = self.log)
+        if dcp_propdir and tag in ("D126", "D127", "D128"):
+            self.save_dcpav_prop(c, tag, data_in)
 
         self.state.ch.setdefault(self.name, []).append(state)
+
+    # TRACE_DCP_PROPDIR=<dir>: keep every setDCPAVProp blob (TimingElements,
+    # ColorElements, ...) as <dir>/<n>-<key>.bin, raw OSSerialize as Linux's
+    # debugfs copies are (13.5 numbering: D126 start, D127 chunk, D128 end)
+    def save_dcpav_prop(self, c, tag, data_in):
+        method = c.get_method()
+        if method is None:
+            return
+        st = self.dcpep.prop_state
+
+        def start(length):
+            st["data"] = bytearray()
+            return True
+
+        def chunk(data, offset, length):
+            if st.get("data") is not None and offset == len(st["data"]):
+                st["data"] += data[:length]
+            return True
+
+        def end(key):
+            blob = st.pop("data", None)
+            if blob is None:
+                return True
+            st["n"] = st.get("n", 0) + 1
+            path = os.path.join(dcp_propdir, f"{st['n']:02d}-{key}.bin")
+            with open(path, "wb") as fd:
+                fd.write(blob)
+            self.log(f"saved setDCPAVProp {key!r} ({len(blob)} bytes) to {path}")
+            return True
+
+        try:
+            method.callback({"D126": start, "D127": chunk, "D128": end}[tag], data_in)
+        except Exception as e:
+            self.log(f"setDCPAVProp save failed: {type(e).__name__}: {e}")
 
     def ack(self, msg, dir):
         assert msg.LEN == 0
@@ -910,6 +948,7 @@ class DCPEp(EP):
         self.state.op_verb = {}
         self.state.ch = {}
         self.state.dumpfile = None
+        self.prop_state = {}
 
         self.ch_cmd      = DCPCallChannel(self, "CMD",      0x00000, 0x8000)
         self.ch_oobcmd   = DCPCallChannel(self, "OOBCMD",   0x08000, 0x8000)
