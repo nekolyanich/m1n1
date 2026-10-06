@@ -27,8 +27,17 @@ def regs(name):
 
 dcp = regs(f"dcpext{n}")
 pipe = regs(f"dispext{n}")
-skip = dcp[:2]  # ASC mailbox and the window trace_dcp traces
-want = pipe + dcp[2:]
+# trace_dcp.py owns the ASC mailbox, dcpext reg 1 and both DARTs
+skip = dcp[:2] + regs(f"dart-dispext{n}") + regs(f"dart-dcpext{n}")
+
+# the dispext ranges nest (disp-0 spans the others): merge them first
+merged = []
+for a, size in sorted(pipe + dcp[2:]):
+    b = a + size
+    if merged and a <= merged[-1][1]:
+        merged[-1][1] = max(merged[-1][1], b)
+    else:
+        merged.append([a, b])
 
 def cut(start, end):
     pieces = [(start, end)]
@@ -37,8 +46,8 @@ def cut(start, end):
         pieces = [p for a, b in pieces for p in ((a, min(b, s)), (max(a, e), b)) if p[0] < p[1]]
     return pieces
 
-for addr, size in want:
-    for a, b in cut(addr, addr + size):
+for start, end in merged:
+    for a, b in cut(start, end):
         hv.trace_range(irange(a, b - a), TraceMode.ASYNC, read=reads, write=True,
                        name=f"disp{n}")
         print(f"trace_dispmmio: tracing {a:#x}+{b - a:#x} writes{' and reads' if reads else ''}")
