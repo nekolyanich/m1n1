@@ -14,6 +14,10 @@ from m1n1.utils import irange
 
 n = os.environ.get("TRACE_DISP", "1")
 reads = os.environ.get("TRACE_DISP_READS") == "1"
+# dispextN regs to trace; the default leaves out reg 4, the PMGR bandwidth page
+# (0x28e3d0000 on t6020) that macOS's kernel writes tens of thousands of times,
+# which slowed macOS too much to reach hotplug
+pick = [int(i) for i in os.environ.get("TRACE_DISP_REGS", "0,1,2,3").split(",") if i]
 
 def regs(name):
     path = "/arm-io/" + name
@@ -26,7 +30,7 @@ def regs(name):
     return r
 
 dcp = regs(f"dcpext{n}")
-pipe = regs(f"dispext{n}")
+pipe = [r for i, r in enumerate(regs(f"dispext{n}")) if i in pick]
 # trace_dcp.py owns the ASC mailbox, dcpext reg 1 and both DARTs
 skip = dcp[:2] + regs(f"dart-dispext{n}") + regs(f"dart-dcpext{n}")
 # and trace_tbtdp_dpin.py the display crossbars
