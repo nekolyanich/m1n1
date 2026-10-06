@@ -29,6 +29,10 @@ dcp = regs(f"dcpext{n}")
 pipe = regs(f"dispext{n}")
 # trace_dcp.py owns the ASC mailbox, dcpext reg 1 and both DARTs
 skip = dcp[:2] + regs(f"dart-dispext{n}") + regs(f"dart-dcpext{n}")
+# and trace_tbtdp_dpin.py the display crossbars
+for node in hv.adt["/arm-io"]:
+    if node.name.startswith("display-crossbar"):
+        skip += regs(node.name)
 
 # the dispext ranges nest (disp-0 spans the others): merge them first
 merged = []
