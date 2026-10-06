@@ -871,6 +871,13 @@ class DCPCallChannel(Reloadable):
         c.print_req(logger = self.log)
         if dcp_propdir and tag in ("D126", "D127", "D128"):
             self.save_dcpav_prop(c, tag, data_in)
+        # hotPlug_notify_gated: show its reply buffer as DCP hands it over, to tell
+        # the bytes DCP pre-fills from the ones the AP writes in its reply
+        if tag == "D576" and out_len:
+            pre = self.dcpep.dart.ioread(self.dcpep.stream,
+                                         self.state.shmem_iova + state.out_addr, out_len)
+            self.log(f"{dir}{self.name}.{msg.OFF:x} D576 output buffer before the reply ({out_len:#x} bytes):")
+            chexdump(pre)
 
         self.state.ch.setdefault(self.name, []).append(state)
 
