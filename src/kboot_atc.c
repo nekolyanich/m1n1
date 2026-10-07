@@ -75,6 +75,8 @@ static const struct adt_tunable_info atc_tunables[] = {
     {"tunable_ATC0AXI2AF", "apple,tunable-axi2af", 0x0, 0x4000, true},
     {"tunable_ATC_FABRIC", "apple,tunable-common-b", 0x45000, 0x4000, true},
     {"tunable_USB_ACIOPHY_TOP", "apple,tunable-common-b", 0x0, 0x4000, true},
+    /* applied by macOS only on entering USB4/Thunderbolt mode */
+    {"tunable_CIO_ACIOPHY_TOP", "apple,tunable-cio-top", 0x0, 0x4000, false},
     {"tunable_AUS_CMN_SHM", "apple,tunable-common-b", 0xa00, 0x4000, true},
     {"tunable_AUS_CMN_TOP", "apple,tunable-common-b", 0x800, 0x4000, true},
     {"tunable_AUSPLL_CORE", "apple,tunable-common-b", 0x2200, 0x4000, true},
