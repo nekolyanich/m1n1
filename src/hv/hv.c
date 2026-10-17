@@ -625,6 +625,8 @@ void hv_arm_tick(bool secondary)
 void hv_maybe_exit(void)
 {
     if (hv_should_exit[smp_id()]) {
+        /* hv_exc_exit counted us in the guest already: a rendezvous must not wait for us */
+        __atomic_and_fetch(&hv_cpus_in_guest, ~BIT(smp_id()), __ATOMIC_ACQUIRE);
         hv_exit_guest();
     }
 }

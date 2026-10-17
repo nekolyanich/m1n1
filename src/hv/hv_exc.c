@@ -568,10 +568,16 @@ static void hv_exc_exit(struct exc_info *ctx)
     PERCPU(exit_voff) = stolen_time;
     PERCPU(exit_valid) = 1;
     PERCPU(exit_time) = mrs(CNTPCT_EL0);
+    /*
+     * Count this CPU in the guest before releasing bhl: the next CPU to take it may start
+     * a proxy at once, and a rendezvous that sees nobody in the guest sends no IPI, so
+     * this CPU would run the guest through the proxy on the old offset and its clock
+     * would go back by the stolen time at its next exit (macOS 15: "Non-monotonic time").
+     */
+    __atomic_or_fetch(&hv_cpus_in_guest, BIT(smp_id()), __ATOMIC_ACQUIRE);
     spin_unlock(&bhl);
     hv_wake_parked();
     hv_maybe_exit();
-    __atomic_or_fetch(&hv_cpus_in_guest, BIT(smp_id()), __ATOMIC_ACQUIRE);
 
     hv_set_spsr(ctx->spsr);
     hv_set_elr(ctx->elr);
