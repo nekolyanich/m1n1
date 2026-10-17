@@ -30,6 +30,12 @@ struct hv_pcpu_data {
     u64 pmc_irq_mode;
     u64 exc_entry_pmcr0_cnt;
     u64 mdscr;
+    /* DEBUG(macos15-nomon): catch a guest clock that goes back across an HV exit */
+    u64 exit_voff;
+    u64 entry_raw;
+    u64 exit_time;
+    u32 exit_valid;
+    u32 back_logged;
 } ALIGNED(64);
 
 struct hv_pcpu_data pcpu[MAX_CPUS];
@@ -45,6 +51,16 @@ extern int hv_pinned_cpu;
 extern int hv_want_cpu;
 
 static bool time_stealing = true;
+
+/* DEBUG(macos15-nomon): the last proxies, to name the one a CPU ran through */
+extern u64 hv_rdv_sent, hv_rdv_ing0;
+extern int hv_rdv_iters;
+struct proxy_rec {
+    u64 start, lost, sent, ing0;
+    int cpu, iters;
+};
+static struct proxy_rec proxy_ring[16];
+static unsigned int proxy_ring_n;
 
 static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, u32 type,
                           void *extra)
@@ -89,6 +105,13 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
             if (time_stealing) {
                 u64 lost = mrs(CNTPCT_EL0) - entry_time;
                 stolen_time += lost;
+                struct proxy_rec *r = &proxy_ring[proxy_ring_n++ % 16];
+                r->start = entry_time;
+                r->lost = lost;
+                r->sent = hv_rdv_sent;
+                r->ing0 = hv_rdv_ing0;
+                r->cpu = smp_id();
+                r->iters = hv_rdv_iters;
             }
             wdt_thaw();
             // after the stolen time is updated: the deadline is shifted by it
@@ -501,6 +524,7 @@ static void hv_exc_entry(void)
         sysop("msr daifclr, 4");
 
     __atomic_and_fetch(&hv_cpus_in_guest, ~BIT(smp_id()), __ATOMIC_ACQUIRE);
+    PERCPU(entry_raw) = mrs(CNTPCT_EL0);
     spin_lock(&bhl);
     hv_wdt_breadcrumb('X');
     exc_entry_time = mrs(CNTPCT_EL0);
@@ -517,7 +541,33 @@ static void hv_exc_exit(struct exc_info *ctx)
     hv_sprr_timer_arm();
     /* reenable PMU counters */
     reg_set(SYS_IMP_APL_PMCR0, PERCPU(exc_entry_pmcr0_cnt));
+    /*
+     * DEBUG(macos15-nomon): the guest left at entry_raw - exit_voff and comes back at
+     * now - stolen_time; more stolen time than this CPU spent here sends its clock back.
+     */
+    u64 now = mrs(CNTPCT_EL0);
+    if (PERCPU(exit_valid)) {
+        s64 back = (s64)(stolen_time - PERCPU(exit_voff)) - (s64)(now - PERCPU(entry_raw));
+        if (back > 0 && PERCPU(back_logged) < 32) {
+            PERCPU(back_logged)++;
+            printf("HV: CPU %d guest clock goes back %#lx ticks (stolen +%#lx, %#lx in the HV, "
+                   "left the HV @%#lx, entered @%#lx)\n",
+                   smp_id(), back, stolen_time - PERCPU(exit_voff), now - PERCPU(entry_raw),
+                   PERCPU(exit_time), PERCPU(entry_raw));
+            for (int k = 0; k < 16; k++) {
+                struct proxy_rec *r = &proxy_ring[k];
+                if (r->start + r->lost < PERCPU(exit_time) || r->start > now)
+                    continue;
+                printf("HV:   proxy on CPU %d @%#lx +%#lx: IPI sent %#lx, in guest at send %#lx, "
+                       "%d polls\n",
+                       r->cpu, r->start, r->lost, r->sent, r->ing0, r->iters);
+            }
+        }
+    }
     msr(CNTVOFF_EL2, stolen_time);
+    PERCPU(exit_voff) = stolen_time;
+    PERCPU(exit_valid) = 1;
+    PERCPU(exit_time) = mrs(CNTPCT_EL0);
     spin_unlock(&bhl);
     hv_wake_parked();
     hv_maybe_exit();

@@ -491,21 +491,30 @@ void hv_wake_parked(void)
     }
 }
 
+/* DEBUG(macos15-nomon): what the last rendezvous saw */
+u64 hv_rdv_sent, hv_rdv_ing0;
+int hv_rdv_iters;
+
 void hv_rendezvous(void)
 {
     int timeout = 1000000;
 
-    if (!__atomic_load_n(&hv_cpus_in_guest, __ATOMIC_ACQUIRE))
+    hv_rdv_sent = 0;
+    hv_rdv_iters = 0;
+    hv_rdv_ing0 = __atomic_load_n(&hv_cpus_in_guest, __ATOMIC_ACQUIRE);
+    if (!hv_rdv_ing0)
         return;
 
     /* IPI all CPUs. This might result in spurious IPIs to the guest... */
     for (int i = 0; i < MAX_CPUS; i++) {
         if (i != smp_id() && hv_started_cpus[i]) {
             smp_send_ipi(i);
+            hv_rdv_sent |= BIT(i);
         }
     }
 
     while (timeout--) {
+        hv_rdv_iters++;
         if (!__atomic_load_n(&hv_cpus_in_guest, __ATOMIC_ACQUIRE))
             return;
     }
