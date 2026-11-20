@@ -12,5 +12,6 @@ void wdt_thaw(void);
 void wdt_pet(void);
 void wdt_drop(void);
 u64 wdt_secondary_addr(void);
+u64 wdt_get_base(void);
 
 #endif

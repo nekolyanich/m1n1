@@ -12,6 +12,7 @@
 #include "heapblock.h"
 #include "kboot.h"
 #include "mitigations.h"
+#include "s2r.h"
 #include "smp.h"
 #include "utils.h"
 
@@ -314,9 +315,13 @@ int payload_run(void)
     }
 
     if (kernel && fdt) {
-        cpufreq_init();
-        smp_start_secondaries();
-        mitigations_perform();
+        s2r_skip_report();
+        if (!s2r_skip(S2R_SKIP_CPUFREQ))
+            cpufreq_init();
+        if (!s2r_skip(S2R_SKIP_SMP))
+            smp_start_secondaries();
+        if (!s2r_skip(S2R_SKIP_MITIG))
+            mitigations_perform();
         if (enable_tso) {
 
             do_enable_tso();

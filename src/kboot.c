@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "kboot.h"
+#include "s2r.h"
 #include "adt.h"
 #include "assert.h"
 #include "clk.h"
@@ -313,7 +314,7 @@ static int dt_set_chosen(void)
     if (fdt_setprop(dt, node, "asahi,m1n1-stage2-version", m1n1_version, strlen(m1n1_version) + 1))
         bail("FDT: couldn't set asahi,m1n1-stage2-version\n");
 
-    if (dt_set_rng_seed_sep(node)) {
+    if (s2r_skip(S2R_SKIP_RNG) || dt_set_rng_seed_sep(node)) {
         if (dt_set_rng_seed_adt(node))
             bail("FDT: couldn't set random seed");
     }
@@ -1986,7 +1987,8 @@ static struct disp_mapping disp_reserved_regions_t602x[] = {
 static int dt_set_display(void)
 {
     /* lock dart-disp0 to prevent old software from resetting it */
-    dart_lock_adt("/arm-io/dart-disp0", 0);
+    if (!s2r_skip(S2R_SKIP_DARTLOCK))
+        dart_lock_adt("/arm-io/dart-disp0", 0);
     const char compat_piodma_alias[] = "disp0_piodma";
     const char piodma_alias[] = "disp0-piodma";
     const char *disp0_piodma_alias = piodma_alias;
@@ -2812,7 +2814,8 @@ int kboot_prepare_dt(void *fdt)
     }
 
     /* Need to init ISP early to carve out heap */
-    isp_init();
+    if (!s2r_skip(S2R_SKIP_ISP))
+        isp_init();
 
     dt_bufsize = fdt_totalsize(fdt);
     assert(dt_bufsize);
@@ -2871,7 +2874,7 @@ int kboot_prepare_dt(void *fdt)
         return -1;
     if (dt_set_display())
         return -1;
-    if (dt_set_gpu(dt))
+    if (!s2r_skip(S2R_SKIP_GPU) && dt_set_gpu(dt))
         return -1;
     if (dt_set_multitouch())
         return -1;
@@ -2917,6 +2920,9 @@ int kboot_prepare_dt(void *fdt)
      * in one of the above devicetree prep functions, and we want an up-to-date value
      * for the usable memory span to make it into the devicetree.
      */
+    if (s2r_dt_publish(dt)) /* native S2R (notes/sleep/86): the mailbox, and m1n1 kept out of Linux's RAM */
+        return -1;
+
     if (dt_set_memory())
         return -1;
 
@@ -2934,16 +2940,24 @@ int kboot_prepare_dt(void *fdt)
 
 int kboot_boot(void *kernel)
 {
-    mcc_enable_cache();
-    tunables_apply_static();
-    clk_init();
+    if (!s2r_skip(S2R_SKIP_SLC))
+        mcc_enable_cache();
+    if (!s2r_skip(S2R_SKIP_TUNABLES))
+        tunables_apply_static();
+    if (!s2r_skip(S2R_SKIP_MCA))
+        clk_init();
 
-    usb_init();
-    pcie_init();
-    dapf_init_all();
+    if (!s2r_skip(S2R_SKIP_USB))
+        usb_init();
+    if (!s2r_skip(S2R_SKIP_PCIE))
+        pcie_init();
+    if (!s2r_skip(S2R_SKIP_DAPF))
+        dapf_init_all();
 
-    printf("Setting SMP mode to WFE...\n");
-    smp_set_wfe_mode(true);
+    if (!s2r_skip(S2R_SKIP_WFE)) {
+        printf("Setting SMP mode to WFE...\n");
+        smp_set_wfe_mode(true);
+    }
     printf("Preparing to boot kernel at %p with fdt at %p\n", kernel, dt);
 
     next_stage.entry = kernel;

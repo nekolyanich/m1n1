@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "smp.h"
+#include "s2r.h"
 #include "adt.h"
 #include "aic.h"
 #include "aic_regs.h"
@@ -104,7 +105,8 @@ void smp_secondary_entry(void)
     else
         msr(TPIDR_EL1, index);
 
-    printf("  Index: %d (table: %p)\n\n", index, me);
+    if (!s2r_published()) /* the OS owns the UART after the mailbox is out (JJRPF: a UART wait hangs every RVBAR return) */
+        printf("  Index: %d (table: %p)\n\n", index, me);
 
     me->mpidr = mpidr;
 
@@ -569,4 +571,43 @@ u64 smp_get_release_addr(int cpu)
     target->args[2] = 0;
     target->args[3] = 0;
     return (u64)&target->target;
+}
+
+/*
+ * Native S2R (tanabota notes/sleep/86): whether a reset brings the cores back into this image, as aura 30896625
+ * decides it: a running secondary's RVBAR locked to it. On t6020 the readback carries the core index in bits 44-45
+ * and more above (T0: cpu4 0x0110010003ba4001), so the address is compared under GENMASK(43, 12).
+ */
+#define RVBAR_ADDR_S2R GENMASK(43, 12)
+bool smp_resets_return_here(void)
+{
+    if (cpu_features->apple_sysregs_unlocked)
+        return false;
+    for (int i = 0; i < MAX_CPUS; i++) {
+        if (i == boot_cpu_idx || !cpu_info[i].valid || !smp_is_alive(i))
+            continue;
+        u64 rvbar = read64(cpu_info[i].impl_reg);
+        bool ok = (rvbar & RVBAR_LOCK) && (rvbar & RVBAR_ADDR_S2R) == (u64)_vectors_start;
+        printf("s2r: cpu%d RVBAR %#lx: %s\n", i, rvbar, ok ? "locked to this image" : "not ours");
+        return ok;
+    }
+    return false;
+}
+
+/* After a wake (S2R_F_RVBARS, T4b): secondaries whose RVBAR came back unlocked are pointed at this image again
+ * (JJRPF's smp_psci_s2r_prep_secondaries); a powered-off cluster's register may not answer, so reads are guarded. */
+void smp_s2r_fix_rvbars(void)
+{
+    for (int i = 0; i < MAX_CPUS; i++) {
+        if (i == boot_cpu_idx || !cpu_info[i].valid)
+            continue;
+        exc_guard = GUARD_SKIP | GUARD_SILENT;
+        exc_count = 0;
+        u64 rvbar = read64(cpu_info[i].impl_reg);
+        bool readable = !exc_count;
+        if (readable && !(rvbar & RVBAR_LOCK))
+            write64(cpu_info[i].impl_reg, (u64)_vectors_start);
+        exc_guard = GUARD_OFF;
+    }
+    sysop("dsb sy");
 }

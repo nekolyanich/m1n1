@@ -857,6 +857,11 @@ int pcie_init(void)
     return success ? 0 : -1;
 }
 
+int pcie_reinit_apcie(void)
+{
+    return pcie_init_controller(APCIE, "/arm-io/apcie");
+}
+
 int pcie_shutdown(void)
 {
     if (!pcie_initialized)

@@ -82,6 +82,7 @@ void mmu_rm_mapping(u64 from, size_t size);
 void mmu_map_framebuffer(u64 addr, size_t size);
 
 u64 mmu_disable(void);
+void mmu_wake_boot_cpu(void);
 void mmu_restore(u64 state);
 
 static inline bool mmu_active(void)

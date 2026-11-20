@@ -149,8 +149,16 @@ exc_unk:
 .globl cpu_reset
 .type cpu_reset, @function
 cpu_reset:
+    // native S2R (tanabota notes/sleep/86): once the OS has the mailbox, the UART is its own and powered down;
+    // debug_putc would spin on it for ever (JJRPF: every RVBAR return hung here)
+    adrp x9, s2r_mailbox
+    ldr x9, [x9, :lo12:s2r_mailbox]
+    ldr x10, =0x3152325341525541
+    cmp x9, x10
+    b.eq 4f
     mov w0, 'O'
     bl debug_putc
+4:
 
     // for EL3 just keep the shared reset stack for now
     mrs x8, CurrentEL
@@ -188,8 +196,14 @@ cpu_reset:
 
     ldr x2, [sp, #-8]
 
+    adrp x9, s2r_mailbox
+    ldr x9, [x9, :lo12:s2r_mailbox]
+    ldr x10, =0x3152325341525541
+    cmp x9, x10
+    b.eq 5f
     mov w0, 'K'
     bl debug_putc
+5:
 
     mov x0, sp
 

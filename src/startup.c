@@ -5,6 +5,7 @@
 #include "dockchannel_uart.h"
 #include "exception.h"
 #include "firmware.h"
+#include "s2r.h"
 #include "smp.h"
 #include "string.h"
 #include "types.h"
@@ -218,15 +219,20 @@ void _start_c(void *boot_args, void *base)
 /* Secondary SMP core boot */
 void _cpu_reset_c(void *stack)
 {
-    if (!is_boot_cpu())
-        uart_puts("RVBAR entry on secondary CPU");
-    else
-        uart_puts("RVBAR entry on primary CPU");
+    s2r_reset_entry(); /* native S2R: the boot core's fast re-entry never returns from it; a wake arms WD1 */
+    bool quiet = s2r_published(); /* the OS owns the UART once the mailbox is out */
+    if (!quiet) {
+        if (!is_boot_cpu())
+            uart_puts("RVBAR entry on secondary CPU");
+        else
+            uart_puts("RVBAR entry on primary CPU");
 
-    printf("\n  Stack base: %p\n", stack);
-    printf("  MPIDR: 0x%lx\n", mrs(MPIDR_EL1));
+        printf("\n  Stack base: %p\n", stack);
+        printf("  MPIDR: 0x%lx\n", mrs(MPIDR_EL1));
+    }
     init_cpu();
-    printf("  Running in EL%lu\n\n", mrs(CurrentEL) >> 2);
+    if (!quiet)
+        printf("  Running in EL%lu\n\n", mrs(CurrentEL) >> 2);
 
     exception_initialize();
 
@@ -237,6 +243,8 @@ void _cpu_reset_c(void *stack)
 
     if (!is_boot_cpu())
         smp_secondary_entry();
+    else if (s2r_published())
+        s2r_return_to_os();
     else
         m1n1_main();
 }

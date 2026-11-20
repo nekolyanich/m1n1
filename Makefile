@@ -183,6 +183,7 @@ OBJECTS := \
 	sep.o \
 	sio.o \
 	smc.o \
+	s2r.o \
 	smp.o \
 	spmi.o \
 	start.o \

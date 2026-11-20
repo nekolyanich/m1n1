@@ -651,6 +651,22 @@ void mmu_init_secondary(int cpu)
     smp_wait(cpu);
 }
 
+/* native S2R: the boot core's EL2 MMU again after a wake reset (page tables in the reserved heap) */
+void mmu_wake_boot_cpu(void)
+{
+    mmu_configure();
+    if (cpu_features->mmu_sprr)
+        mmu_init_sprr();
+    if (supports_pan())
+        msr(PAN, 0);
+    u64 sctlr = SCTLR_LSMAOE | SCTLR_nTLSMD | SCTLR_TSCXT | SCTLR_ITD;
+    sctlr |= SCTLR_I | SCTLR_C | SCTLR_M | SCTLR_SPAN;
+    sysop("dsb sy");
+    dc_ivac_range(_stack_top, _stack_bot - _stack_top);
+    sysop("dsb sy");
+    write_sctlr(sctlr);
+}
+
 void mmu_shutdown(void)
 {
     fb_console_reserve_lines(3);

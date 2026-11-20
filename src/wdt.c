@@ -167,3 +167,8 @@ void wdt_thaw(void)
         write32(wdt_base + WDT_CTRL(i), ctrl);
     }
 }
+
+u64 wdt_get_base(void)
+{
+    return wdt_base;
+}

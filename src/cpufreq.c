@@ -537,6 +537,15 @@ int cpufreq_init(void)
     return err ? -1 : 0;
 }
 
+int cpufreq_cluster_bases(u64 *bases, int max)
+{
+    const struct cluster_t *cluster = cpufreq_get_clusters();
+    int n = 0;
+    while (cluster && cluster->base && n < max)
+        bases[n++] = (cluster++)->base;
+    return n;
+}
+
 void cpufreq_fixup(void)
 {
     const struct cluster_t *cluster = cpufreq_get_clusters();
