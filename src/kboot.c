@@ -2968,5 +2968,7 @@ int kboot_boot(void *kernel)
     next_stage.args[4] = 0;
     next_stage.restore_logo = false;
 
+    s2r_kboot_deadhand(); /* native: WD1 until Linux's apple_wdt takes it over (task 142) */
+
     return 0;
 }
