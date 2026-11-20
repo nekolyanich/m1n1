@@ -58,10 +58,12 @@ extern volatile u64 s2r_boot_skip;
 bool s2r_skip(u64 bit);
 void s2r_skip_report(void);
 
-/* the dead hand kboot_boot arms on every native boot (a variable: the bench may poke it over the proxy; 0 = off) */
+/* the dead hands kboot_boot arms on every native boot (a variable: the bench may poke it over the proxy; 0 = off) */
 #define S2R_KBOOT_WD1_SECS 120
+#define S2R_KBOOT_WD2_SECS 170
 #define S2R_WD1_MAX_SECS   178 /* U32_MAX ticks of 24 MHz */
 extern volatile u64 s2r_kboot_wd1_secs;
+extern volatile u64 s2r_kboot_wd2_secs;
 void s2r_kboot_deadhand(void);
 
 int s2r_dt_publish(void *dt);

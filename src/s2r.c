@@ -20,6 +20,7 @@ struct s2r_mailbox s2r_mailbox ALIGNED(64);
 volatile u64 s2r_native_flags = S2R_F_DEFAULT;
 volatile u64 s2r_boot_skip = S2R_SKIP_DEFAULT;
 volatile u64 s2r_kboot_wd1_secs = S2R_KBOOT_WD1_SECS;
+volatile u64 s2r_kboot_wd2_secs = S2R_KBOOT_WD2_SECS;
 
 #define S2R_FAST_TICKS (3ULL * 24000000) /* the HV's SLEEP_RESUME_WAKE_WDT_THRESH=3 */
 #define S2R_WD1_SECS   45                /* the wake's dead hand, until Linux's own watchdog takes over */
@@ -27,13 +28,14 @@ volatile u64 s2r_kboot_wd1_secs = S2R_KBOOT_WD1_SECS;
 #define S2R_PMU_STAGE  0x6001
 #define S2R_STAGE_WAKE 0x52
 
-/* WD1 (the block's +0x10: count, +0x14 bite, +0x1c ctl): CTL 0, count 0, bite, reset enable. Also MMU off. */
-static inline void s2r_wd1_arm(u64 wb, u32 secs)
+/* WDn (the block's +0x10*n: count, +4 bite, +0xc ctl): CTL 0, count 0, bite, reset enable. Also MMU off. */
+static inline void s2r_wd_arm(u64 wb, int n, u32 secs)
 {
-    write32(wb + 0x1c, 0);
-    write32(wb + 0x10, 0);
-    write32(wb + 0x14, secs * 24000000U);
-    write32(wb + 0x1c, 4);
+    u64 r = wb + 0x10 * n;
+    write32(r + 0xc, 0);
+    write32(r + 0x0, 0);
+    write32(r + 0x4, secs * 24000000U);
+    write32(r + 0xc, 4);
 }
 
 /* everything the reset path needs, gathered at publish (MMU on) and cleaned to PoC: the reset path runs MMU off */
@@ -181,26 +183,39 @@ void s2r_reset_entry(void)
     }
 
     if (st.wdt_base) /* the HV's late-entry fallback (start.S) */
-        s2r_wd1_arm(st.wdt_base, S2R_WD1_SECS);
+        s2r_wd_arm(st.wdt_base, 1, S2R_WD1_SECS);
 }
 
 /*
  * The last thing kboot_boot does on a native boot (EL2; a guest m1n1 under the HV leaves the watchdogs to the HV):
- * a WD1 dead hand, so a Linux that dies before its watchdog runs still resets into the park (native-t2-b: WD1 off
- * since wdt_disable, no reset, power button). Linux's apple_wdt sees WD1 armed at probe (WDOG_HW_RUNNING), sets its
- * own timeout and pets it from the kernel until the test-initrd's busybox watchdog opens it; it never disables it.
+ * dead hands, so a Linux that dies still resets into the park (native-t2-b: none, power button).
+ * WD1: Linux's apple_wdt sees it armed at probe (WDOG_HW_RUNNING), sets its own timeout and pets it until the
+ * test-initrd's busybox watchdog opens it; but apple_wdt_suspend stops it, so a hang inside `echo mem` before the
+ * commit has no WD1 (native-t2-c: no reset with watchdog.open_timeout=90).
+ * WD2: Linux leaves it alone until sleep-seq's commit re-arms it to 60 s (SEQ_WD2), and a real wake disarms it; so it
+ * is the deadline for reaching the commit at all. A run that never commits resets at kboot + WD2.
  */
-void s2r_kboot_deadhand(void)
+static void s2r_kboot_wd(u64 wb, int n, u64 secs)
 {
-    u64 secs = s2r_kboot_wd1_secs, wb = wdt_get_base();
-    if (!in_el2() || !secs || !wb) {
-        printf("s2r: no kboot dead hand (EL%lu, %lu s, wdt %#lx)\n", mrs(CurrentEL) >> 2, secs, wb);
+    if (!secs) {
+        printf("s2r: kboot dead hand: WD%d off\n", n);
         return;
     }
     if (secs > S2R_WD1_MAX_SECS)
         secs = S2R_WD1_MAX_SECS;
-    s2r_wd1_arm(wb, secs);
-    printf("s2r: kboot dead hand: WD1 bites in %lu s unless Linux's watchdog takes it over\n", secs);
+    s2r_wd_arm(wb, n, secs);
+    printf("s2r: kboot dead hand: WD%d bites in %lu s\n", n, secs);
+}
+
+void s2r_kboot_deadhand(void)
+{
+    u64 wb = wdt_get_base();
+    if (!in_el2() || !wb) {
+        printf("s2r: no kboot dead hand (EL%lu, wdt %#lx)\n", mrs(CurrentEL) >> 2, wb);
+        return;
+    }
+    s2r_kboot_wd(wb, 1, s2r_kboot_wd1_secs); /* until Linux's apple_wdt takes it over */
+    s2r_kboot_wd(wb, 2, s2r_kboot_wd2_secs); /* until sleep-seq's commit re-arms it */
 }
 
 /* the HV's v47 AON_REPLAY (pd314's macOS wake write log), as is */
