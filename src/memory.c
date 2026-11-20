@@ -43,6 +43,7 @@ CACHE_RANGE_OP(dc_cvau_range, "dc cvau")
 CACHE_RANGE_OP(dc_civac_range, "dc civac")
 
 extern u8 _stack_top[];
+extern u8 _stack_bot[];
 
 uint64_t ram_base = 0;
 

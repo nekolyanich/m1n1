@@ -2,6 +2,7 @@
 
 #include "smp.h"
 #include "s2r.h"
+#include "exception.h"
 #include "adt.h"
 #include "aic.h"
 #include "aic_regs.h"
