@@ -575,24 +575,48 @@ u64 smp_get_release_addr(int cpu)
 }
 
 /*
- * Native S2R (tanabota notes/sleep/86): whether a reset brings the cores back into this image, as aura 30896625
- * decides it: a running secondary's RVBAR locked to it. On t6020 the readback carries the core index in bits 44-45
- * and more above (T0: cpu4 0x0110010003ba4001), so the address is compared under GENMASK(43, 12).
+ * Native S2R (tanabota notes/sleep/86): whether a reset brings the boot core back into this image. aura 30896625
+ * decides on the first running secondary and only where m1n1 leaves RVBARs alone (!apple_sysregs_unlocked); on M2
+ * that flag is set, so it never published (native-t2-b), and smp_start_cpu has rewritten every secondary's RVBAR by
+ * now (the write drops the lock). The boot core's RVBAR is the one iBoot locked and m1n1 kept (T0: 12 of 12 locked
+ * to this image), and the only one the M1 wake goes through, so it decides. Every core is printed, raw, as a record.
+ * On t6020 the readback carries the core index in bits 44-45 and more above (T0: cpu4 0x0110010003ba4001), so the
+ * address is compared under GENMASK(43, 12). Reads only, guarded.
  */
 #define RVBAR_ADDR_S2R GENMASK(43, 12)
 bool smp_resets_return_here(void)
 {
-    if (cpu_features->apple_sysregs_unlocked)
-        return false;
+    u64 vec = (u64)_vectors_start;
+    printf("s2r: publish check: EL%lu, apple_sysregs_unlocked %d, _base %#lx, _vectors_start %#lx, boot cpu%d\n",
+           mrs(CurrentEL) >> 2, cpu_features->apple_sysregs_unlocked, (u64)_base, vec, boot_cpu_idx);
+
+    int boot = -1, nsec = 0, nsec_here = 0;
     for (int i = 0; i < MAX_CPUS; i++) {
-        if (i == boot_cpu_idx || !cpu_info[i].valid || !smp_is_alive(i))
+        if (!cpu_info[i].valid)
             continue;
+        exc_guard = GUARD_SKIP | GUARD_SILENT;
+        exc_count = 0;
         u64 rvbar = read64(cpu_info[i].impl_reg);
-        bool ok = (rvbar & RVBAR_LOCK) && (rvbar & RVBAR_ADDR_S2R) == (u64)_vectors_start;
-        printf("s2r: cpu%d RVBAR %#lx: %s\n", i, rvbar, ok ? "locked to this image" : "not ours");
-        return ok;
+        bool readable = !exc_count;
+        exc_guard = GUARD_OFF;
+        bool locked = rvbar & RVBAR_LOCK, here = (rvbar & RVBAR_ADDR_S2R) == vec;
+        const char *what = !readable          ? "unreadable"
+                           : locked && here   ? "locked to this image"
+                           : here             ? "this image, unlocked"
+                           : locked           ? "locked elsewhere"
+                                              : "unlocked, elsewhere";
+        printf("s2r:   cpu%d%s alive %d RVBAR %#lx: %s\n", i, i == boot_cpu_idx ? " (boot)" : "", smp_is_alive(i),
+               rvbar, what);
+        if (i == boot_cpu_idx) {
+            boot = readable && locked && here;
+        } else if (readable) {
+            nsec++;
+            nsec_here += here;
+        }
     }
-    return false;
+    printf("s2r: publish check: boot core %s; %d of %d secondaries lead here (decided on the boot core)\n",
+           boot < 0 ? "not found" : boot ? "locked to this image" : "not locked to this image", nsec_here, nsec);
+    return boot == 1;
 }
 
 /* After a wake (S2R_F_RVBARS, T4b): secondaries whose RVBAR came back unlocked are pointed at this image again
