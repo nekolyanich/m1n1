@@ -31,6 +31,7 @@ extern struct s2r_mailbox s2r_mailbox;
 #define S2R_F_CRUMB    BIT(4) /* the wake writes PMU boot_stage 0x52 before resume_pa (the user's yes, 11-20) */
 #define S2R_F_SEP_PS   BIT(5) /* the wake writes the SEP PS word back if the cut left DEV_DISABLE (JJRPF) */
 #define S2R_F_RVBARS   BIT(6) /* the wake rewrites unlocked secondary RVBARs to this image (T4b) */
+#define S2R_F_CPUFREQ_INIT BIT(7) /* the wake reruns cpufreq_init() before the +0x200f8 writes, as the HV (row 9) */
 #define S2R_F_DEFAULT  (S2R_F_CPUFREQ | S2R_F_AON | S2R_F_PCIE | S2R_F_CRUMB)
 extern volatile u64 s2r_native_flags;
 

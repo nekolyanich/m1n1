@@ -269,6 +269,8 @@ void s2r_return_to_os(void)
     mmu_wake_boot_cpu();
     u64 f = s2r_native_flags;
 
+    if (f & S2R_F_CPUFREQ_INIT) /* the HV's order (hv_s2r_linux_take): cpufreq_init, then +0x200f8 */
+        cpufreq_init();
     if (f & S2R_F_CPUFREQ)
         for (u64 i = 0; i < st.nf8; i++)
             write64(st.f8_base[i] + 0x200f8, st.f8_val[i]);
