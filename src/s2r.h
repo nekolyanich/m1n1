@@ -50,10 +50,15 @@ extern volatile u64 s2r_native_flags;
 #define S2R_SKIP_DAPF     BIT(12)
 #define S2R_SKIP_WFE      BIT(13)
 #define S2R_SKIP_N        14
-/* the c1pr template's SLEEP_LINUX_GUEST_SKIP=slc,mitig,isp,rng,dartlock,tunables,mca,usb,wfe */
+/*
+ * The c1pr template's SLEEP_LINUX_GUEST_SKIP=slc,mitig,isp,rng,dartlock,tunables,mca,usb,wfe (0x2779) without wfe
+ * (0x0779). Under the HV these steps were not done by anyone (the host m1n1 never runs kboot_boot), so skipping them
+ * natively gives the same state, except wfe: Linux releases spin-table cores with sev only, which wakes a WFE but
+ * not m1n1's deep_wfi; the HV traps the guest's WFI, so there the loop kept polling, natively the cores never come.
+ */
 #define S2R_SKIP_DEFAULT                                                                                         \
     (S2R_SKIP_SLC | S2R_SKIP_MITIG | S2R_SKIP_ISP | S2R_SKIP_RNG | S2R_SKIP_DARTLOCK | S2R_SKIP_TUNABLES |       \
-     S2R_SKIP_MCA | S2R_SKIP_USB | S2R_SKIP_WFE)
+     S2R_SKIP_MCA | S2R_SKIP_USB)
 extern volatile u64 s2r_boot_skip;
 bool s2r_skip(u64 bit);
 void s2r_skip_report(void);
