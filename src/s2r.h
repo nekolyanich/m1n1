@@ -52,21 +52,18 @@ extern volatile u64 s2r_native_flags;
 #define S2R_SKIP_WFE      BIT(13)
 #define S2R_SKIP_N        14
 /*
- * The c1pr template's SLEEP_LINUX_GUEST_SKIP=slc,mitig,isp,rng,dartlock,tunables,mca,usb,wfe (0x2779) without wfe
- * (0x0779). Under the HV these steps were not done by anyone (the host m1n1 never runs kboot_boot), so skipping them
- * natively gives the same state, except wfe: Linux releases spin-table cores with sev only, which wakes a WFE but
- * not m1n1's deep_wfi; the HV traps the guest's WFI, so there the loop kept polling, natively the cores never come.
+ * The daily stage 2: only the SLC stays off at boot. The bench's 0x779 (the HV guest's state) bisected on the NixOS
+ * line (11-23, 1 of 1 per arm): only slc is needed; with the SLC on, the entry stops at the SEP's noirq. The rest
+ * (mitigations, ISP, RNG seed, DART lock, tunables, clk_init, USB) run as on a normal boot.
  */
-#define S2R_SKIP_DEFAULT                                                                                         \
-    (S2R_SKIP_SLC | S2R_SKIP_MITIG | S2R_SKIP_ISP | S2R_SKIP_RNG | S2R_SKIP_DARTLOCK | S2R_SKIP_TUNABLES |       \
-     S2R_SKIP_MCA | S2R_SKIP_USB)
+#define S2R_SKIP_DEFAULT S2R_SKIP_SLC
 extern volatile u64 s2r_boot_skip;
 bool s2r_skip(u64 bit);
 void s2r_skip_report(void);
 
 /* the dead hands kboot_boot arms on every native boot (a variable: the bench may poke it over the proxy; 0 = off) */
 #define S2R_KBOOT_WD1_SECS 120
-#define S2R_KBOOT_WD2_SECS 170
+#define S2R_KBOOT_WD2_SECS 0 /* daily: off, Linux never pets WD2 (a boot without a sleep reset at 170 s) */
 #define S2R_WD1_MAX_SECS   178 /* U32_MAX ticks of 24 MHz */
 extern volatile u64 s2r_kboot_wd1_secs;
 extern volatile u64 s2r_kboot_wd2_secs;
