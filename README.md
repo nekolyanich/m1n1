@@ -35,7 +35,7 @@ nvme_apple.sleep_idle=1 nvme_apple.sleep_keep_ps=1 nvme_apple.bench_reinit_first
 nvme_apple.bench_ans_tunables=7 nvme_apple.bench_reinit_keep=1
 pcie_apple.bench_perst=3 pcie_apple.bench_gpfix=5 pcie_apple.bench_resume=1
 dwc3_apple.sleep_stop=1 phy_apple_atc.s2r_assume_cut=1
-asahi.sleep_s2r=1
+asahi.sleep_s2r=3
 ```
 
 | Words | What they do |
@@ -50,7 +50,7 @@ asahi.sleep_s2r=1
 | `nvme_apple.*` | the root NVMe across the power loss (ANS re-init and tunables after the cut) |
 | `pcie_apple.*` | macOS's PCIe port teardown before the sleep and its way back (Wi-Fi, BT, SD) |
 | `dwc3_apple.sleep_stop`, `phy_apple_atc.s2r_assume_cut` | stop the USB hosts before the sleep (together or neither); without them the second sleep of a boot aborts at xhci (Run/Stop -110). Cost: a mounted USB disk loses its block device at every sleep |
-| `asahi.sleep_s2r=1` | the GPU firmware idles at the sleep-seq commit and restarts warm after the wake (being tested) |
+| `asahi.sleep_s2r=3` | the GPU firmware idles at `.prepare` and restarts warm after the wake (works 2 of 2; an aborted sleep loses the GPU until a reboot). The commit idle (`=1`) fails: GFX is auto-gated at the commit |
 
 Module defaults the kernel branch changes, no cmdline needed: `clk_apple_nco.s2r_enable` (the audio NCO channels
 stay enabled at the commit; with them off the cut doesn't happen with the sound card bound) and
