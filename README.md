@@ -1,3 +1,63 @@
+# m1n1, m2pro-s2r-wip: personal experiments, not for use
+
+**This branch is a personal experiment log, not a release and not a contribution.** It is the m1n1 stage 2 that
+boots one MacBook Pro 16" M2 Pro (t6020, J416s) running NixOS, with native suspend to RAM (S2R) on top of m1n1
+v2.0.0. It is unreviewed, carries bench-only switches and hypervisor tracing, and is tested on that one machine
+only. Don't use it on a machine you care about, and don't report problems with it to Asahi Linux or upstream
+m1n1. The changes were written with AI assistance ([Claude Code](https://claude.ai/code)); upstream m1n1 does not
+accept AI-assisted contributions, and nothing here is offered to it.
+
+The matching kernel is https://github.com/nekolyanich/linux/tree/m2pro-s2r-wip (Asahi 7.3.4 line). Discussion of
+the S2R work on t6020: https://github.com/JJRPF/Aurora-DeepIdle/issues/5.
+
+## What this branch adds for S2R
+
+- The wake path for an OS at EL2: at boot iBoot locks every core's RVBAR to m1n1's image; m1n1 stays resident in
+  reserved memory (kept out of Linux's RAM) and publishes a mailbox. At the wake the boot core enters m1n1 at the
+  RVBAR, m1n1 tells a real wake from the short bounce, redoes `init_cpu`, writes back each cluster's cpufreq word,
+  replays the AON writes, reruns its apcie bring-up and jumps to Linux's `cpu_resume` at EL2. Secondaries come back
+  through RVBAR -> m1n1 -> spin table.
+- Daily defaults: only the SLC is skipped at boot; a WD1 dead hand at kboot until Linux's apple_wdt takes over.
+- 256K of FDT room (the PMP nub's tunables overflow 96K), `apfs-preboot-uuid` forwarded to /chosen, sep-warm on M2.
+
+## Kernel command line used with it (NixOS, all as of 2026-11-25)
+
+The S2R words on top of the usual Asahi line. "Bench" in a name means the switch started on the test bench; these
+are still needed for the cut to work.
+
+```
+apple_sleep.s2r=1 apple_sleep.via_firmware=1 apple_sleep.resume=2 apple_sleep.slc_ok=1
+apple_sleep.edge_timer=1 apple_sleep.edge_on=1040207 apple_sleep.groups=0xfcfb55ffdfffffbf
+apple_sleep.smc_notify=7 apple_sleep.pmvc=0x100 apple_sleep.sep_sleep_early=1 apple_sleep.aop_sleep=1
+apple_sleep.hybrid=0x5e32600 appledrm.sleep_hold=1
+spmi_apple_controller.boot_crumb=1 apple_sleep.dispext_crumb=1
+nvme_apple.sleep_idle=1 nvme_apple.sleep_keep_ps=1 nvme_apple.bench_reinit_first=1
+nvme_apple.bench_ans_tunables=7 nvme_apple.bench_reinit_keep=1
+pcie_apple.bench_perst=3 pcie_apple.bench_gpfix=5 pcie_apple.bench_resume=1
+dwc3_apple.sleep_stop=1 phy_apple_atc.s2r_assume_cut=1
+asahi.sleep_s2r=1
+```
+
+| Words | What they do |
+|---|---|
+| `apple_sleep.s2r`, `via_firmware`, `resume=2` | the full S2R entry (the sleep-seq table), `pm_suspend_via_firmware()` for the drivers' firmware-sleep paths, and the return through `cpu_suspend` with m1n1's mailbox |
+| `slc_ok`, `edge_timer`, `edge_on`, `groups` | the entry with the SLC on, cpu0's edge as macOS's, the power-state words and entry groups the cut runs with |
+| `smc_notify=7`, `pmvc=0x100` | slpw/slpa/0x201, WKTP=2 and pmVC to the SMC, as macOS |
+| `sep_sleep_early`, `aop_sleep` | the SEP's SLEEP at device suspend (the cut needs it), the AOP's sleep path |
+| `hybrid=0x5e32600` | the bit set the cut runs with (DCP boot, SD, PCIe MSI, CPUs on, native hold/quench, edge witness, DCP at EL2) |
+| `appledrm.sleep_hold` | the external DCPs' firmware stops for the sleep; without it nothing cuts |
+| `boot_crumb`, `dispext_crumb` | progress bytes in the PMU, so a failed sleep says how far it got |
+| `nvme_apple.*` | the root NVMe across the power loss (ANS re-init and tunables after the cut) |
+| `pcie_apple.*` | macOS's PCIe port teardown before the sleep and its way back (Wi-Fi, BT, SD) |
+| `dwc3_apple.sleep_stop`, `phy_apple_atc.s2r_assume_cut` | stop the USB hosts before the sleep (together or neither); without them the second sleep of a boot aborts at xhci (Run/Stop -110). Cost: a mounted USB disk loses its block device at every sleep |
+| `asahi.sleep_s2r=1` | the GPU firmware idles at the sleep-seq commit and restarts warm after the wake (being tested) |
+
+Module defaults the kernel branch changes, no cmdline needed: `clk_apple_nco.s2r_enable` (the audio NCO channels
+stay enabled at the commit; with them off the cut doesn't happen with the sound card bound) and
+`snd_soc_apple_mca.fmt_restore` (the MCA DAI format written again after a wake; the speakers need it).
+
+---
+
 # m1n1: A bootloader and experimentation playground for Apple Silicon
 
 ## Building
